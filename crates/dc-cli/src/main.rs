@@ -51,7 +51,11 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Check { config, format, verbose } => {
+        Commands::Check {
+            config,
+            format,
+            verbose,
+        } => {
             commands::check::execute_check(&config, format, verbose)?;
         }
         Commands::Init { path } => {

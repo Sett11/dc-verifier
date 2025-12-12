@@ -16,12 +16,18 @@ pub struct ChainBuilder<'a> {
     /// Data flow tracker
     #[allow(dead_code)]
     data_flow: &'a DataFlowTracker<'a>,
+    /// Enable verbose debug output
+    verbose: bool,
 }
 
 impl<'a> ChainBuilder<'a> {
     /// Creates a new chain builder
-    pub fn new(graph: &'a CallGraph, data_flow: &'a DataFlowTracker<'a>) -> Self {
-        Self { graph, data_flow }
+    pub fn new(graph: &'a CallGraph, data_flow: &'a DataFlowTracker<'a>, verbose: bool) -> Self {
+        Self {
+            graph,
+            data_flow,
+            verbose,
+        }
     }
 
     /// Builds chain from entry point to end point
@@ -34,14 +40,13 @@ impl<'a> ChainBuilder<'a> {
 
     /// Finds all chains in project
     pub fn find_all_chains(&self) -> Result<Vec<DataChain>> {
-        let verbose = std::env::var("DC_VERIFIER_VERBOSE").is_ok();
         let mut chains = Vec::new();
 
         // Find all routes (API entry points)
         let routes =
             crate::call_graph::find_nodes(self.graph, |n| matches!(n, CallNode::Route { .. }));
 
-        if verbose {
+        if self.verbose {
             eprintln!(
                 "[DEBUG] Found {} route nodes in graph (total nodes: {})",
                 routes.len(),
@@ -56,7 +61,7 @@ impl<'a> ChainBuilder<'a> {
                 .node_weight(route_index)
                 .ok_or_else(|| anyhow!("Route node not found: {:?}", route))?;
 
-            if verbose {
+            if self.verbose {
                 if let CallNode::Route { path, method, .. } = route_node {
                     eprintln!(
                         "[DEBUG] Processing route {}: {} {} (node {:?})",
@@ -71,7 +76,7 @@ impl<'a> ChainBuilder<'a> {
             // Build chain Frontend → Backend → Database
             match self.build_forward_chain(*route) {
                 Ok(forward_chain) => {
-                    if verbose {
+                    if self.verbose {
                         eprintln!(
                             "[DEBUG] Successfully built forward chain from route {:?} ({} links)",
                             route.0.index(),
@@ -81,7 +86,7 @@ impl<'a> ChainBuilder<'a> {
                     chains.push(forward_chain);
                 }
                 Err(e) => {
-                    if verbose {
+                    if self.verbose {
                         eprintln!(
                             "[DEBUG] Failed to build forward chain from route {:?}: {}",
                             route.0.index(),
@@ -94,7 +99,7 @@ impl<'a> ChainBuilder<'a> {
             // Build chain Database → Backend → Frontend
             match self.build_reverse_chain(*route) {
                 Ok(reverse_chain) => {
-                    if verbose {
+                    if self.verbose {
                         eprintln!(
                             "[DEBUG] Successfully built reverse chain from route {:?} ({} links)",
                             route.0.index(),
@@ -104,7 +109,7 @@ impl<'a> ChainBuilder<'a> {
                     chains.push(reverse_chain);
                 }
                 Err(e) => {
-                    if verbose {
+                    if self.verbose {
                         eprintln!(
                             "[DEBUG] Failed to build reverse chain from route {:?}: {}",
                             route.0.index(),
@@ -115,7 +120,7 @@ impl<'a> ChainBuilder<'a> {
             }
         }
 
-        if verbose {
+        if self.verbose {
             eprintln!(
                 "[DEBUG] Total chains built: {} (from {} routes)",
                 chains.len(),

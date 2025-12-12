@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 pub struct FastApiCallGraphBuilder {
     core_builder: CallGraphBuilder,
     app_path: PathBuf,
+    verbose: bool,
 }
 
 impl FastApiCallGraphBuilder {
@@ -14,12 +15,20 @@ impl FastApiCallGraphBuilder {
         Self {
             core_builder: CallGraphBuilder::new(),
             app_path,
+            verbose: false,
         }
     }
 
     /// Sets the maximum recursion depth
     pub fn with_max_depth(mut self, max_depth: Option<usize>) -> Self {
         self.core_builder = self.core_builder.with_max_depth(max_depth);
+        self
+    }
+
+    /// Sets the verbose flag for debug output
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self.core_builder = self.core_builder.with_verbose(verbose);
         self
     }
 

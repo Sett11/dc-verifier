@@ -12,10 +12,6 @@ use std::path::PathBuf;
 
 /// Executes data chain verification
 pub fn execute_check(config_path: &str, format: ReportFormat, verbose: bool) -> Result<()> {
-    // Set verbose mode via environment variable so core modules can check it
-    if verbose {
-        std::env::set_var("DC_VERIFIER_VERBOSE", "1");
-    }
     // 1. Load configuration
     let config = Config::load(config_path)?;
 
@@ -47,7 +43,7 @@ pub fn execute_check(config_path: &str, format: ReportFormat, verbose: bool) -> 
                 let app_path = PathBuf::from(app_path);
 
                 // Build call graph for FastAPI
-                let mut builder = FastApiCallGraphBuilder::new(app_path);
+                let mut builder = FastApiCallGraphBuilder::new(app_path).with_verbose(verbose);
                 // Set max recursion depth from config
                 if let Some(max_depth) = config.max_recursion_depth {
                     builder = builder.with_max_depth(Some(max_depth));
@@ -56,7 +52,7 @@ pub fn execute_check(config_path: &str, format: ReportFormat, verbose: bool) -> 
 
                 // Create DataFlowTracker and ChainBuilder
                 let tracker = DataFlowTracker::new(&graph);
-                let chain_builder = ChainBuilder::new(&graph, &tracker);
+                let chain_builder = ChainBuilder::new(&graph, &tracker, verbose);
 
                 // Find all chains
                 let chains = chain_builder.find_all_chains()?;
@@ -71,12 +67,13 @@ pub fn execute_check(config_path: &str, format: ReportFormat, verbose: bool) -> 
 
                 // Build call graph for TypeScript
                 let builder = TypeScriptCallGraphBuilder::new(src_paths)
-                    .with_max_depth(config.max_recursion_depth);
+                    .with_max_depth(config.max_recursion_depth)
+                    .with_verbose(verbose);
                 let graph = builder.build_graph()?;
 
                 // Create DataFlowTracker and ChainBuilder
                 let tracker = DataFlowTracker::new(&graph);
-                let chain_builder = ChainBuilder::new(&graph, &tracker);
+                let chain_builder = ChainBuilder::new(&graph, &tracker, verbose);
 
                 // Find all chains
                 let chains = chain_builder.find_all_chains()?;

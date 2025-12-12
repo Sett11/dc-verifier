@@ -18,6 +18,8 @@ pub struct TypeScriptCallGraphBuilder {
     max_depth: Option<usize>,
     /// Current recursion depth
     current_depth: usize,
+    /// Enable verbose debug output
+    verbose: bool,
 }
 
 impl TypeScriptCallGraphBuilder {
@@ -33,12 +35,19 @@ impl TypeScriptCallGraphBuilder {
             project_root: None,
             max_depth: None,
             current_depth: 0,
+            verbose: false,
         }
     }
 
     /// Sets the maximum recursion depth
     pub fn with_max_depth(mut self, max_depth: Option<usize>) -> Self {
         self.max_depth = max_depth;
+        self
+    }
+
+    /// Sets the verbose flag for debug output
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
         self
     }
 
