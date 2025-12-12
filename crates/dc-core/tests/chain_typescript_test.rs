@@ -65,7 +65,7 @@ fn test_chain_with_typescript_function() {
     });
 
     let tracker = DataFlowTracker::new(&graph);
-    let _builder = ChainBuilder::new(&graph, &tracker);
+    let _builder = ChainBuilder::new(&graph, &tracker, false);
 
     // Check that function contains TypeScript schema in parameters
     let function_node_data = graph.node_weight(function_node).unwrap();
