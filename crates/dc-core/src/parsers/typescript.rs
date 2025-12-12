@@ -546,22 +546,19 @@ impl TypeScriptParser {
 
     /// Checks if expression is a Zod call
     fn is_zod_call(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::Member(member_expr) => {
-                if let Expr::Ident(ident) = member_expr.obj.as_ref() {
-                    if ident.sym.as_ref() == "z" {
-                        if let MemberProp::Ident(prop) = &member_expr.prop {
-                            let method = prop.sym.as_ref();
-                            return method == "object"
-                                || method == "string"
-                                || method == "number"
-                                || method == "boolean"
-                                || method == "array";
-                        }
+        if let Expr::Member(member_expr) = expr {
+            if let Expr::Ident(ident) = member_expr.obj.as_ref() {
+                if ident.sym.as_ref() == "z" {
+                    if let MemberProp::Ident(prop) = &member_expr.prop {
+                        let method = prop.sym.as_ref();
+                        return method == "object"
+                            || method == "string"
+                            || method == "number"
+                            || method == "boolean"
+                            || method == "array";
                     }
                 }
             }
-            _ => {}
         }
         false
     }
@@ -915,7 +912,7 @@ impl TypeScriptParser {
                     format!(
                         "{}.{}",
                         self.ts_entity_name_to_string(&qualified.left),
-                        qualified.right.sym.as_ref().to_string()
+                        qualified.right.sym.as_ref()
                     )
                 }
             },
@@ -978,7 +975,7 @@ impl TypeScriptParser {
                 format!(
                     "{}.{}",
                     self.ts_entity_name_to_string(&qualified.left),
-                    qualified.right.sym.as_ref().to_string()
+                    qualified.right.sym.as_ref()
                 )
             }
         }
@@ -1252,35 +1249,32 @@ impl TypeScriptParser {
         let mut methods = Vec::new();
 
         for member in &class.body {
-            match member {
-                swc_ecma_ast::ClassMember::Method(method) => {
-                    let span = method.span;
-                    let (line, column) = converter.byte_offset_to_location(span.lo.0 as usize);
+            if let swc_ecma_ast::ClassMember::Method(method) = member {
+                let span = method.span;
+                let (line, column) = converter.byte_offset_to_location(span.lo.0 as usize);
 
-                    let name = match &method.key {
-                        swc_ecma_ast::PropName::Ident(ident) => ident.sym.as_ref().to_string(),
-                        swc_ecma_ast::PropName::Str(str) => {
-                            str.value.as_str().unwrap_or("").to_string()
-                        }
-                        _ => "unknown".to_string(),
-                    };
+                let name = match &method.key {
+                    swc_ecma_ast::PropName::Ident(ident) => ident.sym.as_ref().to_string(),
+                    swc_ecma_ast::PropName::Str(str) => {
+                        str.value.as_str().unwrap_or("").to_string()
+                    }
+                    _ => "unknown".to_string(),
+                };
 
-                    let parameters = self.extract_function_parameters(&method.function);
-                    let return_type = self.extract_return_type(&method.function);
-                    let is_async = method.function.is_async;
-                    let is_static = method.is_static;
+                let parameters = self.extract_function_parameters(&method.function);
+                let return_type = self.extract_return_type(&method.function);
+                let is_async = method.function.is_async;
+                let is_static = method.is_static;
 
-                    methods.push(ClassMethod {
-                        name,
-                        line,
-                        column,
-                        parameters,
-                        return_type,
-                        is_async,
-                        is_static,
-                    });
-                }
-                _ => {}
+                methods.push(ClassMethod {
+                    name,
+                    line,
+                    column,
+                    parameters,
+                    return_type,
+                    is_async,
+                    is_static,
+                });
             }
         }
 

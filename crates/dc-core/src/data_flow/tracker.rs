@@ -24,7 +24,7 @@ impl<'a> DataFlowTracker<'a> {
     pub fn add_variable(&mut self, node: NodeId, variable: Variable) {
         self.variables
             .entry(node)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(variable);
     }
 

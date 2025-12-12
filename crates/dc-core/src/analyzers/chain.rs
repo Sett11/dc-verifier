@@ -37,7 +37,7 @@ impl<'a> ChainBuilder<'a> {
 
         // Find all routes (API entry points)
         let routes =
-            crate::call_graph::find_nodes(&self.graph, |n| matches!(n, CallNode::Route { .. }));
+            crate::call_graph::find_nodes(self.graph, |n| matches!(n, CallNode::Route { .. }));
 
         for route in routes {
             // Build chain Frontend → Backend → Database
@@ -58,7 +58,7 @@ impl<'a> ChainBuilder<'a> {
     pub fn build_forward_chain(&self, start: NodeId) -> Result<DataChain> {
         self.ensure_node_exists(start)?;
         let path = self.collect_path(start, |node| {
-            crate::call_graph::outgoing_nodes(&self.graph, node)
+            crate::call_graph::outgoing_nodes(self.graph, node)
         });
 
         if path.is_empty() {
@@ -81,7 +81,7 @@ impl<'a> ChainBuilder<'a> {
     pub fn build_reverse_chain(&self, start: NodeId) -> Result<DataChain> {
         self.ensure_node_exists(start)?;
         let mut path = self.collect_path(start, |node| {
-            crate::call_graph::incoming_nodes(&self.graph, node)
+            crate::call_graph::incoming_nodes(self.graph, node)
         });
         if path.is_empty() {
             bail!("Failed to build reverse chain: empty path");
@@ -148,9 +148,7 @@ impl<'a> ChainBuilder<'a> {
             .map(|(idx, node_id)| {
                 let mut link_type = self.determine_link_type(*node_id);
                 // Simplified logic without duplication by direction
-                if total == 1 {
-                    link_type = LinkType::Source;
-                } else if idx == 0 {
+                if total == 1 || idx == 0 {
                     link_type = LinkType::Source;
                 } else if idx == total - 1 {
                     link_type = LinkType::Sink;
@@ -273,18 +271,16 @@ impl<'a> ChainBuilder<'a> {
             .ok_or_else(|| anyhow!("Route node not found: {:?}", route_node_id))?;
 
         if let CallNode::Route { handler, .. } = route_node {
-            if let Some(handler_node) = self.graph.node_weight(handler.0).cloned() {
-                if let CallNode::Function {
-                    name,
-                    parameters,
-                    file,
-                    line,
-                    ..
-                } = handler_node
-                {
-                    let location = self.location_from_path(&file, line);
-                    return Ok(self.extract_function_schema(&parameters, &name, &location));
-                }
+            if let Some(CallNode::Function {
+                name,
+                parameters,
+                file,
+                line,
+                ..
+            }) = self.graph.node_weight(handler.0).cloned()
+            {
+                let location = self.location_from_path(&file, line);
+                return Ok(self.extract_function_schema(&parameters, &name, &location));
             }
         }
 

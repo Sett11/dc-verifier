@@ -110,31 +110,32 @@ impl ContractRule for MissingFieldRule {
         // Also check fields that exist in to_schema but are missing in from_schema
         // (if they are not optional)
         for (field_name, to_field) in &to_schema.properties {
-            if !to_field.optional && !from_schema.properties.contains_key(field_name) {
-                if !to_schema.required.contains(field_name) {
-                    // Add to required if not already there
-                    mismatches.push(Mismatch {
-                        mismatch_type: MismatchType::MissingField,
-                        path: field_name.clone(),
-                        expected: TypeInfo {
-                            base_type: to_field.base_type,
-                            schema_ref: None,
-                            constraints: to_field.constraints.clone(),
-                            optional: false,
-                        },
-                        actual: TypeInfo {
-                            base_type: BaseType::Unknown,
-                            schema_ref: None,
-                            constraints: Vec::new(),
-                            optional: true,
-                        },
-                        location: contract.from_schema.location.clone(),
-                        message: format!(
-                            "Missing required field '{}' in source schema",
-                            field_name
-                        ),
-                    });
-                }
+            if !to_field.optional
+                && !from_schema.properties.contains_key(field_name)
+                && !to_schema.required.contains(field_name)
+            {
+                // Add to required if not already there
+                mismatches.push(Mismatch {
+                    mismatch_type: MismatchType::MissingField,
+                    path: field_name.clone(),
+                    expected: TypeInfo {
+                        base_type: to_field.base_type,
+                        schema_ref: None,
+                        constraints: to_field.constraints.clone(),
+                        optional: false,
+                    },
+                    actual: TypeInfo {
+                        base_type: BaseType::Unknown,
+                        schema_ref: None,
+                        constraints: Vec::new(),
+                        optional: true,
+                    },
+                    location: contract.from_schema.location.clone(),
+                    message: format!(
+                        "Missing required field '{}' in source schema",
+                        field_name
+                    ),
+                });
             }
         }
 

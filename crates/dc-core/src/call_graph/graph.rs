@@ -13,10 +13,11 @@ where
     graph
         .node_indices()
         .filter(|&idx| {
-            graph
-                .node_weight(idx)
-                .map(|node| predicate(node))
-                .unwrap_or(false)
+            if let Some(node) = graph.node_weight(idx) {
+                predicate(node)
+            } else {
+                false
+            }
         })
         .map(NodeId::from)
         .collect()

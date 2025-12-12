@@ -31,13 +31,10 @@ impl PythonParser {
     ) -> Vec<Import> {
         let mut imports = Vec::new();
 
-        match ast {
-            ast::Mod::Module(module) => {
-                for stmt in &module.body {
-                    self.extract_imports_from_stmt(stmt, &mut imports, file_path, converter);
-                }
+        if let ast::Mod::Module(module) = ast {
+            for stmt in &module.body {
+                self.extract_imports_from_stmt(stmt, &mut imports, file_path, converter);
             }
-            _ => {}
         }
 
         imports
@@ -181,6 +178,7 @@ impl PythonParser {
         for base in bases {
             let base_name = self.expr_to_string(base);
             // Extract the last segment of the path (split by '.' or '::')
+            #[allow(clippy::double_ended_iterator_last)]
             let last_segment = base_name
                 .split('.')
                 .last()
@@ -404,10 +402,8 @@ impl PythonParser {
                 }
             }
             ast::Expr::Dict(dict) => {
-                for key in &dict.keys {
-                    if let Some(key_expr) = key {
-                        self.walk_expr(key_expr, context, calls, file_path, converter);
-                    }
+                for key_expr in dict.keys.iter().flatten() {
+                    self.walk_expr(key_expr, context, calls, file_path, converter);
                 }
                 for value in &dict.values {
                     self.walk_expr(value, context, calls, file_path, converter);
@@ -610,11 +606,8 @@ impl PythonParser {
     fn get_decorator_name(&self, decorator: &ast::Expr) -> Option<String> {
         match decorator {
             ast::Expr::Attribute(attr) => {
-                if let Some(base) = self.get_decorator_name(&attr.value) {
-                    Some(format!("{}.{}", base, attr.attr))
-                } else {
-                    None
-                }
+                self.get_decorator_name(&attr.value)
+                    .map(|base| format!("{}.{}", base, attr.attr))
             }
             ast::Expr::Name(name) => Some(name.id.to_string()),
             ast::Expr::Call(call_expr) => self.get_decorator_name(&call_expr.func),

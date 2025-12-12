@@ -632,7 +632,7 @@ impl CallGraphBuilder {
     /// Takes &Box<Arg>
     fn create_parameter_from_arg(
         &self,
-        arg: &Box<ast::Arg>,
+        arg: &ast::Arg,
         default: Option<&ast::Expr>,
     ) -> Parameter {
         let optional = default.is_some();
@@ -847,7 +847,7 @@ impl CallGraphBuilder {
 
         let remaining = import_path.trim_start_matches('.');
         if !remaining.is_empty() {
-            let replaced = remaining.replace('.', &std::path::MAIN_SEPARATOR.to_string());
+            let replaced = remaining.replace('.', std::path::MAIN_SEPARATOR_STR);
             path = path.join(replaced);
         }
 
@@ -867,7 +867,7 @@ impl CallGraphBuilder {
             .project_root
             .clone()
             .unwrap_or_else(|| PathBuf::from("."));
-        let replaced = import_path.replace('.', &std::path::MAIN_SEPARATOR.to_string());
+        let replaced = import_path.replace('.', std::path::MAIN_SEPARATOR_STR);
         let mut path = root.join(replaced);
 
         if path.is_dir() {
