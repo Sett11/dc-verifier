@@ -61,7 +61,7 @@ To ensure consistent development environment and catch formatting/linting issues
    # Auto-fix formatting issues
    cargo fmt
    
-   # Run linter
+   # Run linter (IMPORTANT: use -D warnings to match CI)
    cargo clippy --all-targets --all-features -- -D warnings
    
    # Run all tests
@@ -70,6 +70,8 @@ To ensure consistent development environment and catch formatting/linting issues
    # Build the project
    cargo build
    ```
+   
+   **Important**: Always use `-D warnings` with clippy to match GitHub Actions behavior. Without this flag, warnings won't be treated as errors and you might miss issues that will fail in CI.
 
 3. **Exit the container** when all checks pass and commit your changes.
 

@@ -644,10 +644,11 @@ impl CallGraphBuilder {
         // Check if any base class is BaseModel
         let is_pydantic = class_def.bases.iter().any(|base| {
             let base_str = self.parser.expr_to_string(base);
+            // Use rsplit to get the last segment efficiently
             let last_segment = base_str
-                .split('.')
-                .last()
-                .or_else(|| base_str.split("::").last())
+                .rsplit('.')
+                .next()
+                .or_else(|| base_str.rsplit("::").next())
                 .unwrap_or(&base_str);
             last_segment == "BaseModel" || base_str == "pydantic.BaseModel"
         });
