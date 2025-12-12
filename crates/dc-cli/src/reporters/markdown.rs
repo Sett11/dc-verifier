@@ -1,5 +1,5 @@
 use anyhow::Result;
-use dc_core::models::{DataChain, LinkType, SchemaType, Severity, MismatchType};
+use dc_core::models::{DataChain, LinkType, MismatchType, SchemaType, Severity};
 use std::fs;
 use std::path::Path;
 
@@ -165,7 +165,9 @@ impl MarkdownReporter {
         report.push_str("## Recommendations\n\n");
         let recommendations = Self::generate_recommendations(chains);
         if recommendations.is_empty() {
-            report.push_str("✅ **No issues detected. All data chains are correctly configured.**\n\n");
+            report.push_str(
+                "✅ **No issues detected. All data chains are correctly configured.**\n\n",
+            );
         } else {
             // Group by severity
             let critical_recs: Vec<_> = recommendations
@@ -263,10 +265,7 @@ impl MarkdownReporter {
 
     /// Formats schema information for display
     fn format_schema_info(schema: &dc_core::models::SchemaReference) -> String {
-        let mut info = format!(
-            "- **Name**: `{}`\n",
-            schema.name
-        );
+        let mut info = format!("- **Name**: `{}`\n", schema.name);
         info.push_str(&format!(
             "- **Type**: {}\n",
             Self::format_schema_type(&schema.schema_type)
