@@ -306,7 +306,7 @@ impl TypeScriptCallGraphBuilder {
     }
 
     /// Gets or creates a module node
-    fn get_or_create_module_node(&mut self, path: &PathBuf) -> Result<NodeId> {
+    fn get_or_create_module_node(&mut self, path: &Path) -> Result<NodeId> {
         let normalized = Self::normalize_path(path);
 
         if let Some(node) = self.module_nodes.get(&normalized) {
@@ -372,15 +372,15 @@ impl TypeScriptCallGraphBuilder {
             }
         }
 
-        let node = NodeId::from(self.graph.add_node(CallNode::Class {
+        NodeId::from(self.graph.add_node(CallNode::Class {
             name: name.to_string(),
             file: file.to_path_buf(),
             methods: Vec::new(),
-        }));
-        node
+        }))
     }
 
     /// Gets or creates a method node
+    #[allow(clippy::too_many_arguments)]
     fn get_or_create_method_node(
         &mut self,
         name: &str,
@@ -420,10 +420,8 @@ impl TypeScriptCallGraphBuilder {
         }));
 
         // Update class methods list
-        if let Some(class_node) = self.graph.node_weight_mut(*class) {
-            if let CallNode::Class { methods, .. } = class_node {
-                methods.push(node);
-            }
+        if let Some(CallNode::Class { methods, .. }) = self.graph.node_weight_mut(*class) {
+            methods.push(node);
         }
 
         node
@@ -500,7 +498,7 @@ impl TypeScriptCallGraphBuilder {
 
         let remaining = import_path.trim_start_matches('.');
         if !remaining.is_empty() {
-            let replaced = remaining.replace('/', &std::path::MAIN_SEPARATOR.to_string());
+            let replaced = remaining.replace('/', std::path::MAIN_SEPARATOR_STR);
             path = path.join(replaced);
         }
 

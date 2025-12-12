@@ -70,23 +70,20 @@ impl ZodExtractor {
 
     /// Checks if expression is a Zod call (z.object, z.string, etc.)
     fn is_zod_call(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::Member(member_expr) => {
-                if let Expr::Ident(ident) = member_expr.obj.as_ref() {
-                    if ident.sym.as_ref() == "z" {
-                        // Check Zod methods
-                        if let MemberProp::Ident(prop) = &member_expr.prop {
-                            let method = prop.sym.as_ref();
-                            return method == "object"
-                                || method == "string"
-                                || method == "number"
-                                || method == "boolean"
-                                || method == "array";
-                        }
+        if let Expr::Member(member_expr) = expr {
+            if let Expr::Ident(ident) = member_expr.obj.as_ref() {
+                if ident.sym.as_ref() == "z" {
+                    // Check Zod methods
+                    if let MemberProp::Ident(prop) = &member_expr.prop {
+                        let method = prop.sym.as_ref();
+                        return method == "object"
+                            || method == "string"
+                            || method == "number"
+                            || method == "boolean"
+                            || method == "array";
                     }
                 }
             }
-            _ => {}
         }
         false
     }

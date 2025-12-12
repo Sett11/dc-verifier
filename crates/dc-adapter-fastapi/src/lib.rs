@@ -1,6 +1,5 @@
 use dc_core::models::DataChain;
 use pyo3::prelude::*;
-use serde_json;
 
 mod call_graph;
 mod extractor;
