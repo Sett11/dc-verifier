@@ -65,22 +65,22 @@ impl MarkdownReporter {
         ));
         report.push_str(&format!("- **Warnings**: {}\n", chains_with_warnings));
         report.push_str(&format!("- **Valid Chains**: {}\n\n", valid_chains));
-        
+
         // Add schema summary section
         let schemas = Self::collect_all_schemas(chains);
         if !schemas.is_empty() {
             report.push_str("## Detected Schemas\n\n");
-            report.push_str(&format!(
-                "Total schemas detected: {}\n\n",
-                schemas.len()
-            ));
-            
+            report.push_str(&format!("Total schemas detected: {}\n\n", schemas.len()));
+
             // Group by schema type
-            let mut by_type: std::collections::HashMap<SchemaType, Vec<&dc_core::models::SchemaReference>> = std::collections::HashMap::new();
+            let mut by_type: std::collections::HashMap<
+                SchemaType,
+                Vec<&dc_core::models::SchemaReference>,
+            > = std::collections::HashMap::new();
             for schema in &schemas {
                 by_type.entry(schema.schema_type).or_default().push(schema);
             }
-            
+
             for (schema_type, type_schemas) in &by_type {
                 report.push_str(&format!(
                     "### {}\n\n",
@@ -306,7 +306,7 @@ impl MarkdownReporter {
             "- **Location**: `{}:{}`\n",
             schema.location.file, schema.location.line
         ));
-        
+
         // Add status if metadata is empty
         if schema.metadata.is_empty() {
             info.push_str("- **Status**: Schema definition not found\n");
@@ -316,7 +316,7 @@ impl MarkdownReporter {
                 let preview = Self::truncate_json_schema(json_schema, 200);
                 info.push_str(&format!("- **Schema Preview**: `{}`\n", preview));
             }
-            
+
             // Add field information if available
             if let Some(fields_str) = schema.metadata.get("fields") {
                 info.push_str("- **Fields**:\n");
@@ -327,7 +327,7 @@ impl MarkdownReporter {
                     }
                 }
             }
-            
+
             // Add other metadata
             let mut other_metadata = Vec::new();
             for (key, value) in &schema.metadata {
@@ -338,25 +338,37 @@ impl MarkdownReporter {
             if !other_metadata.is_empty() {
                 info.push_str("- **Additional Metadata**:\n");
                 for (key, value) in other_metadata {
-                    let display_value = if value.len() > 100 {
-                        format!("{}...", &value[..100])
-                    } else {
-                        value.clone()
-                    };
+                    let display_value = Self::truncate_string_safe(value, 100);
                     info.push_str(&format!("  - `{}`: `{}`\n", key, display_value));
                 }
             }
         }
         info
     }
-    
+
+    /// Truncates a string safely at UTF-8 character boundaries
+    fn truncate_string_safe(s: &str, max_len: usize) -> String {
+        if s.len() <= max_len {
+            return s.to_string();
+        }
+
+        // Find the last valid char boundary at or before max_len
+        let mut truncate_at = max_len;
+        while truncate_at > 0 && !s.is_char_boundary(truncate_at) {
+            truncate_at -= 1;
+        }
+
+        // If we couldn't find a boundary, use the string as-is (shouldn't happen for valid UTF-8)
+        if truncate_at == 0 {
+            return s.to_string();
+        }
+
+        format!("{}...", &s[..truncate_at])
+    }
+
     /// Truncates JSON schema string for preview
     fn truncate_json_schema(json_schema: &str, max_len: usize) -> String {
-        if json_schema.len() <= max_len {
-            json_schema.to_string()
-        } else {
-            format!("{}...", &json_schema[..max_len])
-        }
+        Self::truncate_string_safe(json_schema, max_len)
     }
 
     /// Formats schema type for display
@@ -458,23 +470,28 @@ impl MarkdownReporter {
         }
         result
     }
-    
+
     /// Collects all unique schemas from chains
     fn collect_all_schemas(chains: &[DataChain]) -> Vec<&dc_core::models::SchemaReference> {
         let mut schemas = std::collections::HashSet::new();
         let mut result = Vec::new();
-        
+
         for chain in chains {
             for link in &chain.links {
                 // Use name and location as unique key
-                let key = format!("{}:{}:{}", link.schema_ref.name, link.schema_ref.location.file, link.schema_ref.location.line);
+                let key = format!(
+                    "{}:{}:{}",
+                    link.schema_ref.name,
+                    link.schema_ref.location.file,
+                    link.schema_ref.location.line
+                );
                 if !schemas.contains(&key) {
                     schemas.insert(key);
                     result.push(&link.schema_ref);
                 }
             }
         }
-        
+
         result
     }
 }

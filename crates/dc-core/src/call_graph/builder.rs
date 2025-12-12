@@ -524,7 +524,7 @@ impl CallGraphBuilder {
         // Get location from AST
         let range = func_def.range();
         let (line, _column) = converter.byte_offset_to_location(range.start().into());
-        
+
         let parameters = self.convert_parameters(&func_def.args, file_path, line);
 
         let node_id = NodeId::from(self.graph.add_node(CallNode::Function {
@@ -550,7 +550,7 @@ impl CallGraphBuilder {
         // Get location from AST
         let range = func_def.range();
         let (line, _column) = converter.byte_offset_to_location(range.start().into());
-        
+
         let parameters = self.convert_parameters(&func_def.args, file_path, line);
 
         let node_id = NodeId::from(self.graph.add_node(CallNode::Function {
@@ -577,7 +577,7 @@ impl CallGraphBuilder {
     ) -> Result<NodeId> {
         let range = func_def.range();
         let (line, _column) = converter.byte_offset_to_location(range.start().into());
-        
+
         let mut parameters = self.convert_parameters(&func_def.args, file_path, line);
         // Check decorators before removing the first parameter
         let has_staticmethod = self.has_decorator(&func_def.decorator_list, "staticmethod");
@@ -610,7 +610,7 @@ impl CallGraphBuilder {
     ) -> Result<NodeId> {
         let range = func_def.range();
         let (line, _column) = converter.byte_offset_to_location(range.start().into());
-        
+
         let mut parameters = self.convert_parameters(&func_def.args, file_path, line);
         // Check decorators before removing the first parameter
         let has_staticmethod = self.has_decorator(&func_def.decorator_list, "staticmethod");
@@ -639,7 +639,7 @@ impl CallGraphBuilder {
         converter: &LocationConverter,
     ) -> Result<NodeId> {
         let class_name = class_def.name.to_string();
-        
+
         // Check if this is a Pydantic model and cache it
         // Check if any base class is BaseModel
         let is_pydantic = class_def.bases.iter().any(|base| {
@@ -651,19 +651,28 @@ impl CallGraphBuilder {
                 .unwrap_or(&base_str);
             last_segment == "BaseModel" || base_str == "pydantic.BaseModel"
         });
-        
+
         if is_pydantic {
             let range = class_def.range();
             let (line, column) = converter.byte_offset_to_location(range.start().into());
-            
+
             // Extract Pydantic models from file to get full metadata
             // Read the file to extract models properly
             if let Ok(source) = std::fs::read_to_string(file_path) {
-                if let Ok(ast) = rustpython_parser::parse(&source, rustpython_parser::Mode::Module, file_path.to_string_lossy().as_ref()) {
-                    let models = self.parser.extract_pydantic_models(&ast, &file_path.to_string_lossy(), converter);
-                    
+                if let Ok(ast) = rustpython_parser::parse(
+                    &source,
+                    rustpython_parser::Mode::Module,
+                    file_path.to_string_lossy().as_ref(),
+                ) {
+                    let models = self.parser.extract_pydantic_models(
+                        &ast,
+                        &file_path.to_string_lossy(),
+                        converter,
+                    );
+
                     if let Some(model) = models.iter().find(|m| m.name == class_name) {
-                        self.pydantic_models.insert(class_name.clone(), model.clone());
+                        self.pydantic_models
+                            .insert(class_name.clone(), model.clone());
                     } else {
                         // Fallback: create basic schema reference
                         let schema_ref = SchemaReference {
@@ -681,7 +690,7 @@ impl CallGraphBuilder {
                 }
             }
         }
-        
+
         let node_id = NodeId::from(self.graph.add_node(CallNode::Class {
             name: class_name,
             file: file_path.to_path_buf(),
@@ -899,23 +908,23 @@ impl CallGraphBuilder {
     ) -> TypeInfo {
         // Convert annotation to string representation
         let type_str = self.parser.expr_to_string(annotation);
-        
+
         // Extract the base type name (handle cases like "Optional[User]", "List[User]", etc.)
         let base_type_name = if let Some(open_bracket) = type_str.find('[') {
             &type_str[..open_bracket]
         } else {
             &type_str
         };
-        
+
         // Check if it's Optional
         let is_optional = base_type_name == "Optional" || type_str.contains("Optional");
-        
+
         // Try to find the actual type name (for Optional[T], extract T)
         let actual_type_name = if base_type_name == "Optional" {
             // Extract type from Optional[T]
             if let Some(start) = type_str.find('[') {
                 if let Some(end) = type_str.rfind(']') {
-                    &type_str[start + 1..end].trim()
+                    type_str[start + 1..end].trim()
                 } else {
                     base_type_name
                 }
@@ -925,7 +934,7 @@ impl CallGraphBuilder {
         } else {
             base_type_name
         };
-        
+
         // Check if this type is a Pydantic model in our cache
         let schema_ref = if let Some(schema) = self.pydantic_models.get(actual_type_name) {
             Some(schema.clone())
@@ -939,7 +948,7 @@ impl CallGraphBuilder {
                 None
             }
         };
-        
+
         // Determine base type
         let base_type = if schema_ref.is_some() {
             BaseType::Object
@@ -954,7 +963,7 @@ impl CallGraphBuilder {
                 _ => BaseType::Unknown,
             }
         };
-        
+
         TypeInfo {
             base_type,
             schema_ref,
