@@ -605,10 +605,9 @@ impl PythonParser {
 
     fn get_decorator_name(&self, decorator: &ast::Expr) -> Option<String> {
         match decorator {
-            ast::Expr::Attribute(attr) => {
-                self.get_decorator_name(&attr.value)
-                    .map(|base| format!("{}.{}", base, attr.attr))
-            }
+            ast::Expr::Attribute(attr) => self
+                .get_decorator_name(&attr.value)
+                .map(|base| format!("{}.{}", base, attr.attr)),
             ast::Expr::Name(name) => Some(name.id.to_string()),
             ast::Expr::Call(call_expr) => self.get_decorator_name(&call_expr.func),
             _ => None,

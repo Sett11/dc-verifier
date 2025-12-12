@@ -22,10 +22,7 @@ impl<'a> DataFlowTracker<'a> {
 
     /// Adds a variable to a node
     pub fn add_variable(&mut self, node: NodeId, variable: Variable) {
-        self.variables
-            .entry(node)
-            .or_default()
-            .push(variable);
+        self.variables.entry(node).or_default().push(variable);
     }
 
     /// Tracks a variable through the graph

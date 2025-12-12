@@ -630,11 +630,7 @@ impl CallGraphBuilder {
 
     /// Creates a parameter from Arg (without default)
     /// Takes &Box<Arg>
-    fn create_parameter_from_arg(
-        &self,
-        arg: &ast::Arg,
-        default: Option<&ast::Expr>,
-    ) -> Parameter {
+    fn create_parameter_from_arg(&self, arg: &ast::Arg, default: Option<&ast::Expr>) -> Parameter {
         let optional = default.is_some();
         let default_value = default.map(|expr| {
             // Extract text representation of the default expression

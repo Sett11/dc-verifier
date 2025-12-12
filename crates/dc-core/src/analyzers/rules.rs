@@ -131,10 +131,7 @@ impl ContractRule for MissingFieldRule {
                         optional: true,
                     },
                     location: contract.from_schema.location.clone(),
-                    message: format!(
-                        "Missing required field '{}' in source schema",
-                        field_name
-                    ),
+                    message: format!("Missing required field '{}' in source schema", field_name),
                 });
             }
         }
