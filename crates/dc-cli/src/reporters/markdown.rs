@@ -260,7 +260,7 @@ impl MarkdownReporter {
         } else {
             &link.id
         };
-        format!("{}", schema_name)
+        schema_name.to_string()
     }
 
     /// Formats schema information for display
@@ -375,7 +375,7 @@ impl MarkdownReporter {
         };
         let mut result = base.to_string();
         if type_info.optional {
-            result.push_str("?");
+            result.push('?');
         }
         if let Some(ref schema_ref) = type_info.schema_ref {
             result.push_str(&format!(" ({})", schema_ref.name));
