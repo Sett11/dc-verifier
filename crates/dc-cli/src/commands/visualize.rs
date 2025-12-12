@@ -144,7 +144,7 @@ fn generate_dot(graph: &CallGraph, graph_name: &str) -> Result<String> {
         }
     }
 
-    dot.push_str("\n");
+    dot.push('\n');
 
     // Add edges
     for edge_idx in graph.edge_indices() {

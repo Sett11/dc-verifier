@@ -94,7 +94,7 @@ impl MarkdownReporter {
                             mismatch.mismatch_type, mismatch.message
                         ));
                     }
-                    report.push_str("\n");
+                    report.push('\n');
                 }
             }
 
