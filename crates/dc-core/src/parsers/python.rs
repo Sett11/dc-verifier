@@ -464,7 +464,8 @@ impl PythonParser {
         args
     }
 
-    fn expr_to_string(&self, expr: &ast::Expr) -> String {
+    /// Converts an expression to its string representation
+    pub fn expr_to_string(&self, expr: &ast::Expr) -> String {
         match expr {
             ast::Expr::Name(name) => name.id.to_string(),
             ast::Expr::Attribute(attr) => {

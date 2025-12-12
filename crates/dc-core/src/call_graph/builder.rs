@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::call_graph::decorator::Decorator;
 use crate::call_graph::{CallEdge, CallGraph, CallNode, HttpMethod, Parameter};
-use crate::models::{BaseType, NodeId, TypeInfo};
+use crate::models::{BaseType, Location, NodeId, SchemaReference, SchemaType, TypeInfo};
 use crate::parsers::{Call, Import, LocationConverter, PythonParser};
 
 /// Call graph builder - main class for creating call graphs from code
@@ -24,6 +24,8 @@ pub struct CallGraphBuilder {
     module_nodes: HashMap<PathBuf, NodeId>,
     /// Cache of functions/methods (key: file + name)
     function_nodes: HashMap<String, NodeId>,
+    /// Cache of Pydantic models (class name -> SchemaReference)
+    pydantic_models: HashMap<String, SchemaReference>,
     /// Project root
     project_root: Option<PathBuf>,
     /// Maximum recursion depth (None = unlimited)
@@ -55,6 +57,7 @@ impl CallGraphBuilder {
             parser,
             module_nodes: HashMap::new(),
             function_nodes: HashMap::new(),
+            pydantic_models: HashMap::new(),
             project_root: None,
             max_depth: None,
             current_depth: 0,
@@ -518,11 +521,11 @@ impl CallGraphBuilder {
         file_path: &Path,
         converter: &LocationConverter,
     ) -> Result<NodeId> {
-        let parameters = self.convert_parameters(&func_def.args);
-
         // Get location from AST
         let range = func_def.range();
         let (line, _column) = converter.byte_offset_to_location(range.start().into());
+        
+        let parameters = self.convert_parameters(&func_def.args, file_path, line);
 
         let node_id = NodeId::from(self.graph.add_node(CallNode::Function {
             name: func_def.name.to_string(),
@@ -544,11 +547,11 @@ impl CallGraphBuilder {
         file_path: &Path,
         converter: &LocationConverter,
     ) -> Result<NodeId> {
-        let parameters = self.convert_parameters(&func_def.args);
-
         // Get location from AST
         let range = func_def.range();
         let (line, _column) = converter.byte_offset_to_location(range.start().into());
+        
+        let parameters = self.convert_parameters(&func_def.args, file_path, line);
 
         let node_id = NodeId::from(self.graph.add_node(CallNode::Function {
             name: func_def.name.to_string(),
@@ -570,9 +573,12 @@ impl CallGraphBuilder {
         class_node: NodeId,
         func_def: &ast::StmtFunctionDef,
         file_path: &Path,
-        _converter: &LocationConverter,
+        converter: &LocationConverter,
     ) -> Result<NodeId> {
-        let mut parameters = self.convert_parameters(&func_def.args);
+        let range = func_def.range();
+        let (line, _column) = converter.byte_offset_to_location(range.start().into());
+        
+        let mut parameters = self.convert_parameters(&func_def.args, file_path, line);
         // Check decorators before removing the first parameter
         let has_staticmethod = self.has_decorator(&func_def.decorator_list, "staticmethod");
         if !has_staticmethod && !parameters.is_empty() {
@@ -600,9 +606,12 @@ impl CallGraphBuilder {
         class_node: NodeId,
         func_def: &ast::StmtAsyncFunctionDef,
         file_path: &Path,
-        _converter: &LocationConverter,
+        converter: &LocationConverter,
     ) -> Result<NodeId> {
-        let mut parameters = self.convert_parameters(&func_def.args);
+        let range = func_def.range();
+        let (line, _column) = converter.byte_offset_to_location(range.start().into());
+        
+        let mut parameters = self.convert_parameters(&func_def.args, file_path, line);
         // Check decorators before removing the first parameter
         let has_staticmethod = self.has_decorator(&func_def.decorator_list, "staticmethod");
         if !has_staticmethod && !parameters.is_empty() {
@@ -627,10 +636,54 @@ impl CallGraphBuilder {
         &mut self,
         class_def: &ast::StmtClassDef,
         file_path: &Path,
-        _converter: &LocationConverter,
+        converter: &LocationConverter,
     ) -> Result<NodeId> {
+        let class_name = class_def.name.to_string();
+        
+        // Check if this is a Pydantic model and cache it
+        // Check if any base class is BaseModel
+        let is_pydantic = class_def.bases.iter().any(|base| {
+            let base_str = self.parser.expr_to_string(base);
+            let last_segment = base_str
+                .split('.')
+                .last()
+                .or_else(|| base_str.split("::").last())
+                .unwrap_or(&base_str);
+            last_segment == "BaseModel" || base_str == "pydantic.BaseModel"
+        });
+        
+        if is_pydantic {
+            let range = class_def.range();
+            let (line, column) = converter.byte_offset_to_location(range.start().into());
+            
+            // Extract Pydantic models from file to get full metadata
+            // Read the file to extract models properly
+            if let Ok(source) = std::fs::read_to_string(file_path) {
+                if let Ok(ast) = rustpython_parser::parse(&source, rustpython_parser::Mode::Module, file_path.to_string_lossy().as_ref()) {
+                    let models = self.parser.extract_pydantic_models(&ast, &file_path.to_string_lossy(), converter);
+                    
+                    if let Some(model) = models.iter().find(|m| m.name == class_name) {
+                        self.pydantic_models.insert(class_name.clone(), model.clone());
+                    } else {
+                        // Fallback: create basic schema reference
+                        let schema_ref = SchemaReference {
+                            name: class_name.clone(),
+                            schema_type: SchemaType::Pydantic,
+                            location: Location {
+                                file: file_path.to_string_lossy().to_string(),
+                                line,
+                                column: Some(column),
+                            },
+                            metadata: HashMap::new(),
+                        };
+                        self.pydantic_models.insert(class_name.clone(), schema_ref);
+                    }
+                }
+            }
+        }
+        
         let node_id = NodeId::from(self.graph.add_node(CallNode::Class {
-            name: class_def.name.to_string(),
+            name: class_name,
             file: file_path.to_path_buf(),
             methods: Vec::new(),
         }));
@@ -712,7 +765,12 @@ impl CallGraphBuilder {
         Ok(())
     }
 
-    fn convert_parameters(&self, args: &ast::Arguments) -> Vec<Parameter> {
+    fn convert_parameters(
+        &self,
+        args: &ast::Arguments,
+        file_path: &Path,
+        line: usize,
+    ) -> Vec<Parameter> {
         let mut params = Vec::new();
 
         // posonlyargs, args, kwonlyargs are Vec<ArgWithDefault>
@@ -720,32 +778,37 @@ impl CallGraphBuilder {
 
         // Process posonlyargs
         for arg in &args.posonlyargs {
-            params.push(self.create_parameter_from_arg_with_default(arg));
+            params.push(self.create_parameter_from_arg_with_default(arg, file_path, line));
         }
 
         // Process args
         for arg in &args.args {
-            params.push(self.create_parameter_from_arg_with_default(arg));
+            params.push(self.create_parameter_from_arg_with_default(arg, file_path, line));
         }
 
         // Process kwonlyargs
         for arg in &args.kwonlyargs {
-            params.push(self.create_parameter_from_arg_with_default(arg));
+            params.push(self.create_parameter_from_arg_with_default(arg, file_path, line));
         }
 
         if let Some(arg) = &args.vararg {
             // vararg is Option<Box<Arg>>, without default
-            params.push(self.create_parameter_from_arg(arg, None));
+            params.push(self.create_parameter_from_arg(arg, None, file_path, line));
         }
         if let Some(arg) = &args.kwarg {
             // kwarg is Option<Box<Arg>>, without default
-            params.push(self.create_parameter_from_arg(arg, None));
+            params.push(self.create_parameter_from_arg(arg, None, file_path, line));
         }
         params
     }
 
     /// Creates a parameter from ArgWithDefault (with default)
-    fn create_parameter_from_arg_with_default(&self, arg: &ast::ArgWithDefault) -> Parameter {
+    fn create_parameter_from_arg_with_default(
+        &self,
+        arg: &ast::ArgWithDefault,
+        file_path: &Path,
+        line: usize,
+    ) -> Parameter {
         let optional = arg.default.is_some();
         let default_value = arg.default.as_deref().map(|expr| {
             // Extract text representation of the default expression
@@ -762,14 +825,21 @@ impl CallGraphBuilder {
             }
         });
 
-        Parameter {
-            name: arg.def.arg.to_string(),
-            type_info: TypeInfo {
+        // Extract type annotation if present
+        let type_info = if let Some(annotation) = &arg.def.annotation {
+            self.resolve_type_annotation(annotation, file_path, line)
+        } else {
+            TypeInfo {
                 base_type: BaseType::Unknown,
                 schema_ref: None,
                 constraints: Vec::new(),
                 optional,
-            },
+            }
+        };
+
+        Parameter {
+            name: arg.def.arg.to_string(),
+            type_info,
             optional,
             default_value,
         }
@@ -777,7 +847,13 @@ impl CallGraphBuilder {
 
     /// Creates a parameter from Arg (without default)
     /// Takes &Box<Arg>
-    fn create_parameter_from_arg(&self, arg: &ast::Arg, default: Option<&ast::Expr>) -> Parameter {
+    fn create_parameter_from_arg(
+        &self,
+        arg: &ast::Arg,
+        default: Option<&ast::Expr>,
+        file_path: &Path,
+        line: usize,
+    ) -> Parameter {
         let optional = default.is_some();
         let default_value = default.map(|expr| {
             // Extract text representation of the default expression
@@ -794,16 +870,96 @@ impl CallGraphBuilder {
             }
         });
 
-        Parameter {
-            name: arg.arg.to_string(),
-            type_info: TypeInfo {
+        // Extract type annotation if present
+        let type_info = if let Some(annotation) = &arg.annotation {
+            self.resolve_type_annotation(annotation, file_path, line)
+        } else {
+            TypeInfo {
                 base_type: BaseType::Unknown,
                 schema_ref: None,
                 constraints: Vec::new(),
                 optional,
-            },
+            }
+        };
+
+        Parameter {
+            name: arg.arg.to_string(),
+            type_info,
             optional,
             default_value,
+        }
+    }
+
+    /// Resolves a type annotation to TypeInfo, checking if it's a Pydantic model
+    fn resolve_type_annotation(
+        &self,
+        annotation: &ast::Expr,
+        _file_path: &Path,
+        _line: usize,
+    ) -> TypeInfo {
+        // Convert annotation to string representation
+        let type_str = self.parser.expr_to_string(annotation);
+        
+        // Extract the base type name (handle cases like "Optional[User]", "List[User]", etc.)
+        let base_type_name = if let Some(open_bracket) = type_str.find('[') {
+            &type_str[..open_bracket]
+        } else {
+            &type_str
+        };
+        
+        // Check if it's Optional
+        let is_optional = base_type_name == "Optional" || type_str.contains("Optional");
+        
+        // Try to find the actual type name (for Optional[T], extract T)
+        let actual_type_name = if base_type_name == "Optional" {
+            // Extract type from Optional[T]
+            if let Some(start) = type_str.find('[') {
+                if let Some(end) = type_str.rfind(']') {
+                    &type_str[start + 1..end].trim()
+                } else {
+                    base_type_name
+                }
+            } else {
+                base_type_name
+            }
+        } else {
+            base_type_name
+        };
+        
+        // Check if this type is a Pydantic model in our cache
+        let schema_ref = if let Some(schema) = self.pydantic_models.get(actual_type_name) {
+            Some(schema.clone())
+        } else {
+            // Also check if it's a qualified name (e.g., "models.User")
+            // Extract the last component
+            if let Some(last_dot) = actual_type_name.rfind('.') {
+                let simple_name = &actual_type_name[last_dot + 1..];
+                self.pydantic_models.get(simple_name).cloned()
+            } else {
+                None
+            }
+        };
+        
+        // Determine base type
+        let base_type = if schema_ref.is_some() {
+            BaseType::Object
+        } else {
+            // Try to infer base type from type name
+            match actual_type_name.to_lowercase().as_str() {
+                "str" | "string" => BaseType::String,
+                "int" | "integer" | "float" | "number" => BaseType::Number,
+                "bool" | "boolean" => BaseType::Boolean,
+                "list" | "array" | "tuple" => BaseType::Array,
+                "dict" | "object" => BaseType::Object,
+                _ => BaseType::Unknown,
+            }
+        };
+        
+        TypeInfo {
+            base_type,
+            schema_ref,
+            constraints: Vec::new(),
+            optional: is_optional,
         }
     }
 

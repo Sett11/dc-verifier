@@ -65,7 +65,39 @@ impl MarkdownReporter {
         ));
         report.push_str(&format!("- **Warnings**: {}\n", chains_with_warnings));
         report.push_str(&format!("- **Valid Chains**: {}\n\n", valid_chains));
-        report.push_str("---\n\n");
+        
+        // Add schema summary section
+        let schemas = Self::collect_all_schemas(chains);
+        if !schemas.is_empty() {
+            report.push_str("## Detected Schemas\n\n");
+            report.push_str(&format!(
+                "Total schemas detected: {}\n\n",
+                schemas.len()
+            ));
+            
+            // Group by schema type
+            let mut by_type: std::collections::HashMap<SchemaType, Vec<&dc_core::models::SchemaReference>> = std::collections::HashMap::new();
+            for schema in &schemas {
+                by_type.entry(schema.schema_type).or_default().push(schema);
+            }
+            
+            for (schema_type, type_schemas) in &by_type {
+                report.push_str(&format!(
+                    "### {}\n\n",
+                    Self::format_schema_type(schema_type)
+                ));
+                for schema in type_schemas {
+                    report.push_str(&format!(
+                        "- `{}` at `{}:{}`\n",
+                        schema.name, schema.location.file, schema.location.line
+                    ));
+                }
+                report.push('\n');
+            }
+            report.push_str("---\n\n");
+        } else {
+            report.push_str("---\n\n");
+        }
 
         // Chain details
         for (idx, chain) in chains.iter().enumerate() {
@@ -274,13 +306,57 @@ impl MarkdownReporter {
             "- **Location**: `{}:{}`\n",
             schema.location.file, schema.location.line
         ));
-        if !schema.metadata.is_empty() {
-            info.push_str("- **Metadata**:\n");
+        
+        // Add status if metadata is empty
+        if schema.metadata.is_empty() {
+            info.push_str("- **Status**: Schema definition not found\n");
+        } else {
+            // Add JSON schema preview if available
+            if let Some(json_schema) = schema.metadata.get("json_schema") {
+                let preview = Self::truncate_json_schema(json_schema, 200);
+                info.push_str(&format!("- **Schema Preview**: `{}`\n", preview));
+            }
+            
+            // Add field information if available
+            if let Some(fields_str) = schema.metadata.get("fields") {
+                info.push_str("- **Fields**:\n");
+                for field in fields_str.split(',') {
+                    let field = field.trim();
+                    if !field.is_empty() {
+                        info.push_str(&format!("  - `{}`\n", field));
+                    }
+                }
+            }
+            
+            // Add other metadata
+            let mut other_metadata = Vec::new();
             for (key, value) in &schema.metadata {
-                info.push_str(&format!("  - `{}`: `{}`\n", key, value));
+                if key != "json_schema" && key != "fields" {
+                    other_metadata.push((key, value));
+                }
+            }
+            if !other_metadata.is_empty() {
+                info.push_str("- **Additional Metadata**:\n");
+                for (key, value) in other_metadata {
+                    let display_value = if value.len() > 100 {
+                        format!("{}...", &value[..100])
+                    } else {
+                        value.clone()
+                    };
+                    info.push_str(&format!("  - `{}`: `{}`\n", key, display_value));
+                }
             }
         }
         info
+    }
+    
+    /// Truncates JSON schema string for preview
+    fn truncate_json_schema(json_schema: &str, max_len: usize) -> String {
+        if json_schema.len() <= max_len {
+            json_schema.to_string()
+        } else {
+            format!("{}...", &json_schema[..max_len])
+        }
     }
 
     /// Formats schema type for display
@@ -380,6 +456,25 @@ impl MarkdownReporter {
         if let Some(ref schema_ref) = type_info.schema_ref {
             result.push_str(&format!(" ({})", schema_ref.name));
         }
+        result
+    }
+    
+    /// Collects all unique schemas from chains
+    fn collect_all_schemas(chains: &[DataChain]) -> Vec<&dc_core::models::SchemaReference> {
+        let mut schemas = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        
+        for chain in chains {
+            for link in &chain.links {
+                // Use name and location as unique key
+                let key = format!("{}:{}:{}", link.schema_ref.name, link.schema_ref.location.file, link.schema_ref.location.line);
+                if !schemas.contains(&key) {
+                    schemas.insert(key);
+                    result.push(&link.schema_ref);
+                }
+            }
+        }
+        
         result
     }
 }

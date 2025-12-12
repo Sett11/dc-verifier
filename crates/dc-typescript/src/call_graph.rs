@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use dc_core::call_graph::{CallEdge, CallGraph, CallNode};
-use dc_core::models::NodeId;
-use dc_core::parsers::TypeScriptParser;
+use dc_core::call_graph::{CallEdge, CallGraph, CallNode, HttpMethod};
+use dc_core::models::{Location, NodeId};
+use dc_core::parsers::{Call, TypeScriptParser};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -125,12 +125,26 @@ impl TypeScriptCallGraphBuilder {
             let calls = self
                 .parser
                 .extract_calls(&module, &file_path_str, &converter);
-            for call in calls {
-                if let Err(err) = self.process_call(module_node, &call, &normalized) {
+            for call in &calls {
+                if let Err(err) = self.process_call(module_node, call, &normalized) {
                     eprintln!(
                         "Error processing call '{}' from {:?}: {}",
                         call.name, normalized, err
                     );
+                }
+            }
+            
+            // Detect API calls and create Route nodes
+            for call in calls {
+                if let Some(api_call) = self.detect_api_call(&call) {
+                    if let Err(err) = self.create_route_from_api_call(api_call, &normalized, &file_path_str) {
+                        if self.verbose {
+                            eprintln!(
+                                "[DEBUG] Failed to create route from API call '{}': {}",
+                                call.name, err
+                            );
+                        }
+                    }
                 }
             }
 
@@ -314,6 +328,140 @@ impl TypeScriptCallGraphBuilder {
         Ok(callee_node)
     }
 
+    /// Detects if a call is an API call (fetch, axios, React Query, etc.)
+    fn detect_api_call(&self, call: &Call) -> Option<ApiCallInfo> {
+        let name = &call.name;
+        
+        // Check for fetch(url, options)
+        if name == "fetch" && !call.arguments.is_empty() {
+            let url = call.arguments.first()?.value.clone();
+            // Try to extract method from options (second argument)
+            let method = if call.arguments.len() > 1 {
+                self.extract_method_from_fetch_options(&call.arguments[1].value)
+            } else {
+                HttpMethod::Get
+            };
+            return Some(ApiCallInfo {
+                path: url,
+                method,
+                location: call.location.clone(),
+            });
+        }
+        
+        // Check for axios.get/post/put/delete(url, ...)
+        if name.starts_with("axios.") {
+            let parts: Vec<&str> = name.split('.').collect();
+            if parts.len() == 2 {
+                if let Ok(method) = parts[1].parse::<HttpMethod>() {
+                    let path = call.arguments.first()?.value.clone();
+                    return Some(ApiCallInfo {
+                        path,
+                        method,
+                        location: call.location.clone(),
+                    });
+                }
+            }
+        }
+        
+        // Check for api.get/post/put/delete(url, ...) or client.get/post/...
+        let api_patterns = ["api.", "client.", "http.", "request."];
+        for pattern in &api_patterns {
+            if name.starts_with(pattern) {
+                let parts: Vec<&str> = name.split('.').collect();
+                if parts.len() >= 2 {
+                    if let Ok(method) = parts[1].parse::<HttpMethod>() {
+                        let path = call.arguments.first()?.value.clone();
+                        return Some(ApiCallInfo {
+                            path,
+                            method,
+                            location: call.location.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        
+        // Check for React Query hooks: useQuery, useMutation
+        // These are typically used with query keys that contain URLs
+        if name == "useQuery" || name == "useMutation" {
+            // Try to extract URL from query key (first argument)
+            if let Some(first_arg) = call.arguments.first() {
+                // Query keys are often arrays like ["users", id] or objects
+                // For simplicity, we'll use the first argument as path
+                let path = first_arg.value.clone();
+                let method = if name == "useMutation" {
+                    HttpMethod::Post
+                } else {
+                    HttpMethod::Get
+                };
+                return Some(ApiCallInfo {
+                    path,
+                    method,
+                    location: call.location.clone(),
+                });
+            }
+        }
+        
+        None
+    }
+    
+    /// Extracts HTTP method from fetch options object
+    fn extract_method_from_fetch_options(&self, options_str: &str) -> HttpMethod {
+        // Try to parse method from options string
+        // This is a simple heuristic - in real code, we'd need to parse the object
+        if options_str.contains("method") {
+            if let Some(method_start) = options_str.find("method") {
+                let after_method = &options_str[method_start..];
+                if let Some(colon) = after_method.find(':') {
+                    let method_part = &after_method[colon + 1..];
+                    let method_clean = method_part
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                        .to_uppercase();
+                    if let Ok(method) = method_clean.parse::<HttpMethod>() {
+                        return method;
+                    }
+                }
+            }
+        }
+        HttpMethod::Get
+    }
+    
+    /// Creates a Route node from an API call
+    fn create_route_from_api_call(
+        &mut self,
+        api_call: ApiCallInfo,
+        file_path: &Path,
+        _file_path_str: &str,
+    ) -> Result<()> {
+        // Create a virtual handler function node for this route
+        // In a real implementation, we'd try to find the actual handler
+        let handler_node = self.get_or_create_function_node("api_handler", file_path);
+        let location = api_call.location.clone();
+        
+        let route_node = NodeId::from(self.graph.add_node(CallNode::Route {
+            path: api_call.path,
+            method: api_call.method,
+            handler: handler_node,
+            location: location.clone(),
+        }));
+        
+        // Link route to handler
+        self.graph.add_edge(
+            *route_node,
+            *handler_node,
+            CallEdge::Call {
+                caller: route_node,
+                callee: handler_node,
+                argument_mapping: Vec::new(),
+                location,
+            },
+        );
+        
+        Ok(())
+    }
+    
     /// Gets or creates a module node
     fn get_or_create_module_node(&mut self, path: &Path) -> Result<NodeId> {
         let normalized = Self::normalize_path(path);
@@ -544,4 +692,11 @@ impl TypeScriptCallGraphBuilder {
 
         Ok(())
     }
+}
+
+/// Information about an API call
+struct ApiCallInfo {
+    path: String,
+    method: HttpMethod,
+    location: Location,
 }
