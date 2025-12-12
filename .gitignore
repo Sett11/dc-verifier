@@ -44,6 +44,7 @@ target/
 chain_verification_report.*
 *.verification_report.json
 PUBLISHING.md
+desc_aircon_sales.md
 
 # Sled database cache (if used)
 .dc-verifier-cache/

@@ -29,6 +29,9 @@ enum Commands {
         /// Report format (markdown or json)
         #[arg(short, long, value_enum, default_value_t = ReportFormat::Markdown)]
         format: ReportFormat,
+        /// Enable verbose debug output
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Create configuration file
     Init {
@@ -48,8 +51,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Check { config, format } => {
-            commands::check::execute_check(&config, format)?;
+        Commands::Check { config, format, verbose } => {
+            commands::check::execute_check(&config, format, verbose)?;
         }
         Commands::Init { path } => {
             commands::init::execute_init(&path)?;

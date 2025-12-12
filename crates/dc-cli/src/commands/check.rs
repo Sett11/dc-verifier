@@ -11,7 +11,11 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 
 /// Executes data chain verification
-pub fn execute_check(config_path: &str, format: ReportFormat) -> Result<()> {
+pub fn execute_check(config_path: &str, format: ReportFormat, verbose: bool) -> Result<()> {
+    // Set verbose mode via environment variable so core modules can check it
+    if verbose {
+        std::env::set_var("DC_VERIFIER_VERBOSE", "1");
+    }
     // 1. Load configuration
     let config = Config::load(config_path)?;
 

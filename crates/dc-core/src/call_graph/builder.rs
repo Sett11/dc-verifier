@@ -137,13 +137,25 @@ impl CallGraphBuilder {
         import: &Import,
         current_file: &Path,
     ) -> Result<NodeId> {
+        let verbose = std::env::var("DC_VERIFIER_VERBOSE").is_ok();
+        
         let import_path = match self.resolve_import_path(&import.path, current_file) {
-            Ok(path) => path,
+            Ok(path) => {
+                if verbose {
+                    eprintln!(
+                        "[DEBUG] Resolved import '{}' -> {:?}",
+                        import.path, path
+                    );
+                }
+                path
+            }
             Err(err) => {
-                eprintln!(
-                    "Failed to resolve import '{}' from {:?}: {}",
-                    import.path, current_file, err
-                );
+                if verbose {
+                    eprintln!(
+                        "[DEBUG] Failed to resolve import '{}' from {:?}: {}",
+                        import.path, current_file, err
+                    );
+                }
                 return Ok(from);
             }
         };
@@ -161,7 +173,40 @@ impl CallGraphBuilder {
         );
 
         // Recursively build graph for the imported module
+        if verbose {
+            eprintln!(
+                "[DEBUG] Recursively building graph for imported module {:?}",
+                import_path
+            );
+        }
         let _ = self.build_from_entry(&import_path);
+
+        // If import has specific names (e.g., "from api.routers import auth"),
+        // also try to resolve and process those submodules
+        if !import.names.is_empty() {
+            let import_dir = import_path.parent().unwrap_or(&import_path);
+            
+            for name in &import.names {
+                // Try to find submodule: api/routers/auth.py
+                let submodule_candidates = vec![
+                    import_dir.join(format!("{}.py", name)),
+                    import_dir.join(name).join("__init__.py"),
+                ];
+                
+                for candidate in submodule_candidates {
+                    if candidate.exists() {
+                        if verbose {
+                            eprintln!(
+                                "[DEBUG] Found submodule '{}' from import '{}': {:?}",
+                                name, import.path, candidate
+                            );
+                        }
+                        let _ = self.build_from_entry(&candidate);
+                        break; // Found it, no need to try other candidates
+                    }
+                }
+            }
+        }
 
         Ok(module_node)
     }
@@ -214,16 +259,81 @@ impl CallGraphBuilder {
 
     /// Processes a FastAPI decorator (@app.post)
     pub fn process_decorator(&mut self, decorator: &Decorator, current_file: &Path) -> Result<()> {
+        let verbose = std::env::var("DC_VERIFIER_VERBOSE").is_ok();
+        
         if !self.is_route_decorator(&decorator.name) {
+            if verbose {
+                eprintln!(
+                    "[DEBUG] Decorator '{}' is not a route decorator (file: {:?})",
+                    decorator.name, current_file
+                );
+            }
             return Ok(());
         }
 
         let handler_name = match &decorator.target_function {
             Some(name) => name,
-            None => return Ok(()),
+            None => {
+                if verbose {
+                    eprintln!(
+                        "[DEBUG] Route decorator '{}' has no target function (file: {:?})",
+                        decorator.name, current_file
+                    );
+                }
+                return Ok(());
+            }
         };
 
-        let Some(handler_node) = self.find_function_node(handler_name, current_file) else {
+        if verbose {
+            eprintln!(
+                "[DEBUG] Processing route decorator '{}' -> handler '{}' (file: {:?})",
+                decorator.name, handler_name, current_file
+            );
+        }
+
+        // Try to find handler node - handle qualified names (ClassName.method)
+        let handler_node = if handler_name.contains('.') {
+            // Try qualified name first, then simple name
+            let parts: Vec<&str> = handler_name.split('.').collect();
+            let simple_name = parts.last().copied().unwrap_or(handler_name);
+            
+            if verbose {
+                eprintln!(
+                    "[DEBUG] Handler name '{}' contains '.', trying qualified then simple name '{}'",
+                    handler_name, simple_name
+                );
+            }
+            
+            // First try qualified name as-is
+            if let Some(node) = self.find_function_node(handler_name, current_file) {
+                if verbose {
+                    eprintln!(
+                        "[DEBUG] Found handler using qualified name '{}'",
+                        handler_name
+                    );
+                }
+                Some(node)
+            } else {
+                // Fall back to simple name
+                if verbose {
+                    eprintln!(
+                        "[DEBUG] Qualified name failed, trying simple name '{}'",
+                        simple_name
+                    );
+                }
+                self.find_function_node(simple_name, current_file)
+            }
+        } else {
+            self.find_function_node(handler_name, current_file)
+        };
+
+        let Some(handler_node) = handler_node else {
+            if verbose {
+                eprintln!(
+                    "[DEBUG] Failed to find function node for handler '{}' in file {:?}",
+                    handler_name, current_file
+                );
+            }
             return Ok(());
         };
 
@@ -242,7 +352,7 @@ impl CallGraphBuilder {
         }
 
         let route_node = NodeId::from(self.graph.add_node(CallNode::Route {
-            path: route_path,
+            path: route_path.clone(),
             method: http_method,
             handler: handler_node,
             location: location.clone(),
@@ -258,6 +368,16 @@ impl CallGraphBuilder {
                 location,
             },
         );
+
+        if verbose {
+            eprintln!(
+                "[DEBUG] Created route node: {} {} -> handler node {:?} (file: {:?})",
+                format!("{:?}", http_method).to_uppercase(),
+                route_path,
+                handler_node.0.index(),
+                current_file
+            );
+        }
 
         Ok(())
     }
@@ -550,16 +670,38 @@ impl CallGraphBuilder {
         file_path: &Path,
         converter: &LocationConverter,
     ) -> Result<()> {
+        let verbose = std::env::var("DC_VERIFIER_VERBOSE").is_ok();
         let file_path_str = file_path.to_string_lossy().to_string();
         let decorators = self
             .parser
             .extract_decorators(module_ast, &file_path_str, converter);
+        
+        if verbose {
+            eprintln!(
+                "[DEBUG] Processing {} decorators in file {:?}",
+                decorators.len(),
+                file_path
+            );
+        }
+        
         for decorator in decorators {
-            if let Err(err) = self.process_decorator(&decorator, file_path) {
+            if verbose {
                 eprintln!(
-                    "Failed to process decorator {} in {:?}: {}",
-                    decorator.name, file_path, err
+                    "[DEBUG] Extracted decorator '{}' -> target: {:?} (file: {:?}, line: {})",
+                    decorator.name,
+                    decorator.target_function,
+                    decorator.location.file,
+                    decorator.location.line
                 );
+            }
+            
+            if let Err(err) = self.process_decorator(&decorator, file_path) {
+                if verbose {
+                    eprintln!(
+                        "[DEBUG] Failed to process decorator {} in {:?}: {}",
+                        decorator.name, file_path, err
+                    );
+                }
             }
         }
         Ok(())
@@ -678,9 +820,24 @@ impl CallGraphBuilder {
     }
 
     fn find_function_node(&self, name: &str, current_file: &Path) -> Option<NodeId> {
+        let verbose = std::env::var("DC_VERIFIER_VERBOSE").is_ok();
         let normalized = Self::normalize_path(current_file);
         let direct_key = Self::function_key(&normalized, name);
+        
+        if verbose {
+            eprintln!(
+                "[DEBUG] Searching for function '{}' in file {:?} (direct key: {})",
+                name, current_file, direct_key
+            );
+        }
+        
         if let Some(node) = self.function_nodes.get(&direct_key) {
+            if verbose {
+                eprintln!(
+                    "[DEBUG] Found direct match for '{}' -> node {:?}",
+                    name, node.0.index()
+                );
+            }
             return Some(*node);
         }
 
@@ -691,11 +848,33 @@ impl CallGraphBuilder {
             .filter(|(key, _)| key.ends_with(&format!("::{}", name)))
             .collect();
 
+        if verbose {
+            eprintln!(
+                "[DEBUG] Found {} suffix matches for '{}'",
+                matches.len(),
+                name
+            );
+        }
+
         if matches.is_empty() {
+            if verbose {
+                eprintln!(
+                    "[DEBUG] No suffix matches, trying graph search for '{}'",
+                    name
+                );
+            }
             return crate::call_graph::find_node_by_name(&self.graph, name);
         }
 
         if matches.len() == 1 {
+            if verbose {
+                eprintln!(
+                    "[DEBUG] Single match found for '{}' -> node {:?} (key: {})",
+                    name,
+                    matches[0].1 .0.index(),
+                    matches[0].0
+                );
+            }
             return Some(*matches[0].1);
         }
 
@@ -703,13 +882,21 @@ impl CallGraphBuilder {
         // 1. Prefer exact module path match
         let current_dir = normalized.parent().map(|p| p.to_path_buf());
         if let Some(dir) = current_dir {
-            if let Some((_, node)) = matches.iter().find(|(key, _)| {
+            if let Some((key, node)) = matches.iter().find(|(key, _)| {
                 if let Some(key_path) = Self::extract_path_from_key(key) {
                     key_path.parent() == Some(&dir)
                 } else {
                     false
                 }
             }) {
+                if verbose {
+                    eprintln!(
+                        "[DEBUG] Selected exact path match for '{}' -> node {:?} (key: {})",
+                        name,
+                        node.0.index(),
+                        key
+                    );
+                }
                 return Some(**node);
             }
         }
@@ -723,20 +910,42 @@ impl CallGraphBuilder {
             }
         });
 
-        if let Some((_, node)) = best_match {
+        if let Some((key, node)) = best_match {
             // Log warning about ambiguity
-            eprintln!(
-                "Warning: Ambiguous function name '{}' found {} matches, selected one",
-                name,
-                matches.len()
-            );
+            if verbose {
+                eprintln!(
+                    "[DEBUG] Warning: Ambiguous function name '{}' found {} matches, selected best match -> node {:?} (key: {})",
+                    name,
+                    matches.len(),
+                    node.0.index(),
+                    key
+                );
+            }
             return Some(**node);
         }
 
         // 3. Fallback: select first deterministically (sorted by key)
         let mut sorted_matches = matches.clone();
         sorted_matches.sort_by(|(key_a, _), (key_b, _)| key_a.cmp(key_b));
-        sorted_matches.first().map(|(_, node)| **node)
+        if let Some((key, node)) = sorted_matches.first() {
+            if verbose {
+                eprintln!(
+                    "[DEBUG] Selected first match (sorted) for '{}' -> node {:?} (key: {})",
+                    name,
+                    node.0.index(),
+                    key
+                );
+            }
+            Some(**node)
+        } else {
+            if verbose {
+                eprintln!(
+                    "[DEBUG] No match found for '{}' after all attempts",
+                    name
+                );
+            }
+            None
+        }
     }
 
     /// Extracts path from function key (format "path::name")
@@ -791,6 +1000,7 @@ impl CallGraphBuilder {
     }
 
     fn resolve_import_path(&self, import_path: &str, current_file: &Path) -> Result<PathBuf> {
+        let verbose = std::env::var("DC_VERIFIER_VERBOSE").is_ok();
         let normalized_current = Self::normalize_path(current_file);
         let base_dir = normalized_current
             .parent()
@@ -798,10 +1008,73 @@ impl CallGraphBuilder {
             .or_else(|| self.project_root.clone())
             .unwrap_or_else(|| PathBuf::from("."));
 
+        // First try as relative import (if it starts with .)
         let candidate = if import_path.starts_with('.') {
             self.resolve_relative_import(import_path, &base_dir)
         } else {
-            self.resolve_absolute_import(import_path)
+            // For absolute imports, try both:
+            // 1. From project root (standard absolute import)
+            // 2. From current file's directory (common pattern: api.routers from api/main.py)
+            let absolute_candidate = self.resolve_absolute_import(import_path);
+            
+            // Try relative resolution first (common case: api.routers from api/main.py)
+            // If import starts with current directory name, treat as same-package import
+            let relative_candidate = {
+                let current_dir_name = normalized_current
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str());
+                
+                let import_path_to_resolve = if let Some(dir_name) = current_dir_name {
+                    // If import starts with current directory name, strip it
+                    // e.g., from backend/api/main.py, "api.routers" -> "routers"
+                    if import_path.starts_with(&format!("{}.", dir_name)) {
+                        &import_path[dir_name.len() + 1..]
+                    } else {
+                        import_path
+                    }
+                } else {
+                    import_path
+                };
+                
+                let replaced = import_path_to_resolve.replace('.', std::path::MAIN_SEPARATOR_STR);
+                let mut path = base_dir.join(&replaced);
+                if path.is_dir() {
+                    path = path.join("__init__.py");
+                } else if path.extension().is_none() {
+                    path.set_extension("py");
+                }
+                path
+            };
+            
+            if verbose {
+                eprintln!(
+                    "[DEBUG] Trying to resolve '{}': absolute={:?}, relative={:?}",
+                    import_path, absolute_candidate, relative_candidate
+                );
+            }
+            
+            // Try relative first (more common for same-package imports)
+            if relative_candidate.exists() {
+                if verbose {
+                    eprintln!(
+                        "[DEBUG] Found '{}' via relative resolution: {:?}",
+                        import_path, relative_candidate
+                    );
+                }
+                relative_candidate
+            } else if absolute_candidate.exists() {
+                if verbose {
+                    eprintln!(
+                        "[DEBUG] Found '{}' via absolute resolution: {:?}",
+                        import_path, absolute_candidate
+                    );
+                }
+                absolute_candidate
+            } else {
+                // Neither exists, return absolute for error message
+                absolute_candidate
+            }
         };
 
         if candidate.exists() {
@@ -813,10 +1086,23 @@ impl CallGraphBuilder {
             let mut with_ext = candidate.clone();
             with_ext.set_extension("py");
             if with_ext.exists() {
+                if verbose {
+                    eprintln!(
+                        "[DEBUG] Found '{}' with .py extension: {:?}",
+                        import_path, with_ext
+                    );
+                }
                 return Ok(with_ext);
             }
         }
 
+        if verbose {
+            eprintln!(
+                "[DEBUG] Cannot resolve import path '{}' from {:?} (tried: {:?})",
+                import_path, current_file, candidate
+            );
+        }
+        
         anyhow::bail!(
             "Cannot resolve import path {} from {:?}",
             import_path,
@@ -879,7 +1165,47 @@ impl CallGraphBuilder {
     }
 
     fn is_route_decorator(&self, name: &str) -> bool {
-        name.starts_with("app.") || name.starts_with("router.") || name.contains(".route")
+        // Check for common FastAPI route patterns
+        // 1. Direct app/router access: app.get, router.post, etc.
+        if name.starts_with("app.") || name.starts_with("router.") {
+            return true;
+        }
+        
+        // 2. Contains .route: api_router.route, main_router.route
+        if name.contains(".route") {
+            return true;
+        }
+        
+        // 3. Common router variable names with HTTP methods
+        let router_names = [
+            "api_router", "api", "main_router", "main", "fastapi_router",
+            "fastapi", "app_router", "web_router", "r", "rt", "router_instance"
+        ];
+        
+        for router_name in &router_names {
+            if name.starts_with(&format!("{}.", router_name)) {
+                // Check if it ends with an HTTP method
+                let http_methods = ["get", "post", "put", "patch", "delete", "head", "options"];
+                for method in &http_methods {
+                    if name.ends_with(method) || name.contains(&format!(".{}", method)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        
+        // 4. Any attribute access ending with HTTP methods (flexible pattern)
+        let http_methods = ["get", "post", "put", "patch", "delete", "head", "options"];
+        for method in &http_methods {
+            if name.ends_with(method) || name.contains(&format!(".{}", method)) {
+                // Additional check: should have at least one dot (attribute access)
+                if name.contains('.') {
+                    return true;
+                }
+            }
+        }
+        
+        false
     }
 
     fn extract_http_method(&self, decorator_name: &str) -> Option<HttpMethod> {

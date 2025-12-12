@@ -5,6 +5,7 @@ use crate::models::{
     SchemaReference, SchemaType, Severity, TypeInfo,
 };
 use anyhow::{anyhow, bail, Result};
+use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -33,22 +34,93 @@ impl<'a> ChainBuilder<'a> {
 
     /// Finds all chains in project
     pub fn find_all_chains(&self) -> Result<Vec<DataChain>> {
+        let verbose = std::env::var("DC_VERIFIER_VERBOSE").is_ok();
         let mut chains = Vec::new();
 
         // Find all routes (API entry points)
         let routes =
             crate::call_graph::find_nodes(self.graph, |n| matches!(n, CallNode::Route { .. }));
 
-        for route in routes {
+        if verbose {
+            eprintln!(
+                "[DEBUG] Found {} route nodes in graph (total nodes: {})",
+                routes.len(),
+                self.graph.node_count()
+            );
+        }
+
+        for (idx, route) in routes.iter().enumerate() {
+            let route_index: NodeIndex<u32> = (*route).into();
+            let route_node = self
+                .graph
+                .node_weight(route_index)
+                .ok_or_else(|| anyhow!("Route node not found: {:?}", route))?;
+
+            if verbose {
+                if let CallNode::Route { path, method, .. } = route_node {
+                    eprintln!(
+                        "[DEBUG] Processing route {}: {} {} (node {:?})",
+                        idx + 1,
+                        format!("{:?}", method).to_uppercase(),
+                        path,
+                        route.0.index()
+                    );
+                }
+            }
+
             // Build chain Frontend → Backend → Database
-            if let Ok(forward_chain) = self.build_forward_chain(route) {
-                chains.push(forward_chain);
+            match self.build_forward_chain(*route) {
+                Ok(forward_chain) => {
+                    if verbose {
+                        eprintln!(
+                            "[DEBUG] Successfully built forward chain from route {:?} ({} links)",
+                            route.0.index(),
+                            forward_chain.links.len()
+                        );
+                    }
+                    chains.push(forward_chain);
+                }
+                Err(e) => {
+                    if verbose {
+                        eprintln!(
+                            "[DEBUG] Failed to build forward chain from route {:?}: {}",
+                            route.0.index(),
+                            e
+                        );
+                    }
+                }
             }
 
             // Build chain Database → Backend → Frontend
-            if let Ok(reverse_chain) = self.build_reverse_chain(route) {
-                chains.push(reverse_chain);
+            match self.build_reverse_chain(*route) {
+                Ok(reverse_chain) => {
+                    if verbose {
+                        eprintln!(
+                            "[DEBUG] Successfully built reverse chain from route {:?} ({} links)",
+                            route.0.index(),
+                            reverse_chain.links.len()
+                        );
+                    }
+                    chains.push(reverse_chain);
+                }
+                Err(e) => {
+                    if verbose {
+                        eprintln!(
+                            "[DEBUG] Failed to build reverse chain from route {:?}: {}",
+                            route.0.index(),
+                            e
+                        );
+                    }
+                }
             }
+        }
+
+        if verbose {
+            eprintln!(
+                "[DEBUG] Total chains built: {} (from {} routes)",
+                chains.len(),
+                routes.len()
+            );
         }
 
         Ok(chains)

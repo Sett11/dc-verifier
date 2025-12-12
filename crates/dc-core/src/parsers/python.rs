@@ -630,6 +630,46 @@ impl PythonParser {
     }
 
     fn is_route_decorator(&self, name: &str) -> bool {
-        name.starts_with("app.") || name.starts_with("router.")
+        // Check for common FastAPI route patterns
+        // 1. Direct app/router access: app.get, router.post, etc.
+        if name.starts_with("app.") || name.starts_with("router.") {
+            return true;
+        }
+        
+        // 2. Contains .route: api_router.route, main_router.route
+        if name.contains(".route") {
+            return true;
+        }
+        
+        // 3. Common router variable names with HTTP methods
+        let router_names = [
+            "api_router", "api", "main_router", "main", "fastapi_router",
+            "fastapi", "app_router", "web_router", "r", "rt", "router_instance"
+        ];
+        
+        for router_name in &router_names {
+            if name.starts_with(&format!("{}.", router_name)) {
+                // Check if it ends with an HTTP method
+                let http_methods = ["get", "post", "put", "patch", "delete", "head", "options"];
+                for method in &http_methods {
+                    if name.ends_with(method) || name.contains(&format!(".{}", method)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        
+        // 4. Any attribute access ending with HTTP methods (flexible pattern)
+        let http_methods = ["get", "post", "put", "patch", "delete", "head", "options"];
+        for method in &http_methods {
+            if name.ends_with(method) || name.contains(&format!(".{}", method)) {
+                // Additional check: should have at least one dot (attribute access)
+                if name.contains('.') {
+                    return true;
+                }
+            }
+        }
+        
+        false
     }
 }
