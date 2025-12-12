@@ -1196,7 +1196,7 @@ impl CallGraphBuilder {
             if name.starts_with(&format!("{}.", router_name)) {
                 // Check if last component equals an HTTP method
                 let http_methods = ["get", "post", "put", "patch", "delete", "head", "options"];
-                if let Some(last_component) = name.split('.').last() {
+                if let Some(last_component) = name.split('.').next_back() {
                     if http_methods.contains(&last_component) {
                         return true;
                     }
