@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "crates/dc-core",
+    "crates/dc-adapter-fastapi",
+    "crates/dc-typescript",
+    "crates/dc-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["DCV Contributors"]
+license = "MIT"
+description = "Static analyzer for verifying data chains integrity between application layers (Frontend → Backend → Database) without running the application"
+repository = "https://github.com/Sett11/dc-verifier"
+homepage = "https://github.com/Sett11/dc-verifier"
+documentation = "https://github.com/Sett11/dc-verifier#readme"
+keywords = ["static-analysis", "data-chains", "verification", "fastapi", "typescript", "pydantic", "zod"]
+categories = ["development-tools", "development-tools::testing"]
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "2.0"
+

@@ -1,0 +1,117 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build for ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare binary name
+        id: binary
+        shell: bash
+        run: |
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            echo "name=dc-verifier.exe" >> $GITHUB_OUTPUT
+          else
+            echo "name=dc-verifier" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create release archive
+        shell: bash
+        run: |
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            cd target/${{ matrix.target }}/release
+            zip dc-verifier-${{ matrix.target }}.zip ${{ steps.binary.outputs.name }}
+            mv dc-verifier-${{ matrix.target }}.zip ${{ github.workspace }}/
+          else
+            cd target/${{ matrix.target }}/release
+            tar czf dc-verifier-${{ matrix.target }}.tar.gz ${{ steps.binary.outputs.name }}
+            mv dc-verifier-${{ matrix.target }}.tar.gz ${{ github.workspace }}/
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dc-verifier-${{ matrix.target }}
+          path: dc-verifier-${{ matrix.target }}.${{ matrix.archive }}
+
+  create-release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/**/*
+          name: Release ${{ github.ref_name }}
+          body: |
+            ## Changes in ${{ github.ref_name }}
+
+            See [CHANGELOG.md](CHANGELOG.md) for details.
+
+            ## Installation
+
+            Download the archive for your platform and extract it. Add the binary to your PATH or use it directly.
+
+            ### Supported Platforms
+            - Linux (x86_64)
+            - Windows (x86_64)
+            - macOS (x86_64, ARM64)
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

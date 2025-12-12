@@ -1,0 +1,18 @@
+[package]
+name = "dc-typescript"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+dc-core = { path = "../dc-core" }
+swc_ecma_parser = "27.0"
+swc_ecma_ast = "18.0"
+swc_common = "17.0"
+serde.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile = "3.8"
+

@@ -1,0 +1,21 @@
+project_name = "Python React App"
+entry_point = "backend/api/main.py"
+
+[[adapters]]
+type = "fastapi"
+app_path = "backend/api/main.py"
+
+[[adapters]]
+type = "typescript"
+src_paths = ["frontend/src/features", "frontend/src/entities"]
+
+[rules]
+type_mismatch = "critical"
+missing_field = "warning"
+unnormalized_data = "info"
+
+[output]
+format = "markdown"
+path = ".chain_verification_report.md"
+include_line_numbers = true
+
