@@ -80,7 +80,12 @@ impl PydanticExtractor {
                 // Try to check via issubclass if it's a class
                 let inspect = py.import("inspect").ok()?;
                 let isclass = inspect.getattr("isclass").ok()?;
-                let is_class: bool = isclass.call1((param,)).ok()?.extract().ok().unwrap_or(false);
+                let is_class: bool = isclass
+                    .call1((param,))
+                    .ok()?
+                    .extract()
+                    .ok()
+                    .unwrap_or(false);
 
                 if is_class {
                     // It's a class, check if it's a subclass of BaseModel
