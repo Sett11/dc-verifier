@@ -238,10 +238,7 @@ impl<'a> ChainBuilder<'a> {
                 )
             }
             CallNode::Module { path } => {
-                bail!(
-                    "Cannot create chain link from module: {:?}",
-                    path.display()
-                );
+                bail!("Cannot create chain link from module: {:?}", path.display());
             }
         };
 

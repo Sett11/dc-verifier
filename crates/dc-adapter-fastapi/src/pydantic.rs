@@ -72,7 +72,7 @@ impl PydanticExtractor {
             // First check if it has model_json_schema or model_fields (Pydantic model attributes)
             let has_model_attrs = param.hasattr("model_json_schema").unwrap_or(false)
                 || param.hasattr("model_fields").unwrap_or(false);
-            
+
             if has_model_attrs {
                 // It has Pydantic attributes, likely a class
                 true
@@ -80,14 +80,19 @@ impl PydanticExtractor {
                 // Try to check via issubclass if it's a class
                 let inspect = py.import("inspect").ok()?;
                 let isclass = inspect.getattr("isclass").ok()?;
-                let is_class: bool = isclass.call1((param,)).ok()?.extract().unwrap_or(false);
-                
+                let is_class: bool = isclass.call1((param,)).ok()?.extract().ok().unwrap_or(false);
+
                 if is_class {
                     // It's a class, check if it's a subclass of BaseModel
                     let builtins = py.import("builtins").ok()?;
                     let issubclass_fn = builtins.getattr("issubclass").ok()?;
                     let base_model_ref: &pyo3::Bound<'_, pyo3::PyAny> = base_model.as_ref();
-                    issubclass_fn.call1((param, base_model_ref)).ok()?.extract().unwrap_or(false)
+                    issubclass_fn
+                        .call1((param, base_model_ref))
+                        .ok()?
+                        .extract()
+                        .ok()
+                        .unwrap_or(false)
                 } else {
                     false
                 }
