@@ -78,8 +78,8 @@ export function createService(): UserService {
         .filter(|node| matches!(node, dc_core::call_graph::CallNode::Class { .. }))
         .collect();
 
-    assert!(function_nodes.len() > 0);
-    assert!(class_nodes.len() > 0);
+    assert!(!function_nodes.is_empty());
+    assert!(!class_nodes.is_empty());
 }
 
 #[test]
@@ -135,7 +135,7 @@ export function validate(data: any): void {
         .filter(|edge| matches!(edge, dc_core::call_graph::CallEdge::Call { .. }))
         .collect();
 
-    assert!(call_edges.len() > 0);
+    assert!(!call_edges.is_empty());
 }
 
 #[test]
@@ -172,5 +172,5 @@ export function getUser(id: UserId): User {
         .filter(|node| matches!(node, dc_core::call_graph::CallNode::Function { .. }))
         .collect();
 
-    assert!(function_nodes.len() > 0);
+    assert!(!function_nodes.is_empty());
 }
