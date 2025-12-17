@@ -269,13 +269,19 @@ impl PydanticSchemaExtractor for PydanticExtractor {
             };
             let is_base_model = model_class.hasattr("model_json_schema").unwrap_or(false)
                 || model_class
-                    .call_method0("__mro__")
+                    .getattr("__mro__")
                     .and_then(|mro| {
-                        let mro_list = mro.cast::<pyo3::types::PyList>()?;
-                        // Check if base_model is in the MRO list
-                        let base_model_obj: pyo3::Py<pyo3::types::PyAny> =
-                            base_model.clone().unbind();
-                        mro_list.contains(base_model_obj)
+                        let mro_tuple = mro.cast::<pyo3::types::PyTuple>()?;
+                        // Check if base_model is in the MRO tuple
+                        let base_model_ref: &pyo3::Bound<'_, pyo3::PyAny> = base_model.as_ref();
+                        let mut found = false;
+                        for item in mro_tuple.iter() {
+                            if item.is(base_model_ref) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        Ok(found)
                     })
                     .unwrap_or(false);
 

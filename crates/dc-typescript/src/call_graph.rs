@@ -403,7 +403,7 @@ impl TypeScriptCallGraphBuilder {
                     HttpMethod::Get
                 };
 
-                // Try to extract types from query hook (future enhancement)
+                // Extract request and response types from query hook generic parameters
                 let (request_type, response_type) = self.extract_types_from_query_hook(call);
 
                 return Some(ApiCallInfo {
@@ -456,10 +456,9 @@ impl TypeScriptCallGraphBuilder {
                 (request, response)
             }
             _ => {
-                // More than 3 params - take first as response, last as request
-                let response = call.generic_params.first().cloned();
-                let request = call.generic_params.last().cloned();
-                (request, response)
+                // Conservative behavior: don't guess for 4+ generic parameters
+                // This avoids incorrect type inference for complex generic signatures
+                (None, None)
             }
         }
     }
@@ -468,18 +467,38 @@ impl TypeScriptCallGraphBuilder {
     /// For example: features/auth/api/authQueries.ts -> features/auth/api/authService.ts
     fn find_service_file(&self, queries_file: &Path) -> Option<PathBuf> {
         let file_stem = queries_file.file_stem()?.to_str()?;
+
+        // Early return if file_stem doesn't end with "Queries"
+        if !file_stem.ends_with("Queries") {
+            return None;
+        }
+
+        // Build service name by replacing "Queries" suffix
         let service_name = file_stem.replace("Queries", "Service");
 
         // Search in src_paths
         for src_path in &self.src_paths {
-            let candidate = src_path.join(format!("{}.ts", service_name));
-            if candidate.exists() {
-                return Some(candidate);
-            }
-            // Also try with .tsx extension
-            let candidate_tsx = src_path.join(format!("{}.tsx", service_name));
-            if candidate_tsx.exists() {
-                return Some(candidate_tsx);
+            if src_path.is_dir() {
+                // Directory: join with service filename
+                let candidate = src_path.join(format!("{}.ts", service_name));
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+                let candidate_tsx = src_path.join(format!("{}.tsx", service_name));
+                if candidate_tsx.exists() {
+                    return Some(candidate_tsx);
+                }
+            } else if src_path.is_file() {
+                // File: compare stem and extension
+                if let Some(src_stem) = src_path.file_stem().and_then(|s| s.to_str()) {
+                    if src_stem == service_name {
+                        if let Some(ext) = src_path.extension().and_then(|e| e.to_str()) {
+                            if ext == "ts" || ext == "tsx" {
+                                return Some(src_path.clone());
+                            }
+                        }
+                    }
+                }
             }
         }
 

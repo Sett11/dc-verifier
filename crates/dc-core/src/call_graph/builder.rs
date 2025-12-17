@@ -761,8 +761,19 @@ impl CallGraphBuilder {
             self.parser
                 .extract_pydantic_models(&ast, &file_path.to_string_lossy(), &converter);
 
-        // 5. Add all models to cache
-        for model in models {
+        // 5. Add all models to cache (with JSON schema enrichment)
+        for mut model in models {
+            // Enrich with JSON schema if extractor is available
+            if let Some(ref extractor) = self.schema_extractor {
+                if let Err(err) = extractor.enrich_schema(&mut model) {
+                    if self.verbose {
+                        eprintln!(
+                            "[DEBUG] Failed to enrich schema for {}: {}",
+                            model.name, err
+                        );
+                    }
+                }
+            }
             self.pydantic_models.insert(model.name.clone(), model);
         }
 

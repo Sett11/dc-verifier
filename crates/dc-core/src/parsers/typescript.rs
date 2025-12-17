@@ -521,7 +521,7 @@ impl TypeScriptParser {
         let mut in_string = false;
         let mut string_char = None;
 
-        while let Some(ch) = chars.next() {
+        for ch in chars {
             match ch {
                 '<' if !in_string => {
                     depth += 1;
@@ -1575,33 +1575,27 @@ impl TypeScriptParser {
         converter: &LocationConverter,
     ) {
         for item in &class_decl.class.body {
-            match item {
-                swc_ecma_ast::ClassMember::Method(class_method) => match &class_method.key {
-                    swc_ecma_ast::PropName::Ident(ident) => {
-                        if ident.sym.as_ref() == function_name {
-                            let span = class_method.span;
-                            let (line, column) =
-                                converter.byte_offset_to_location(span.lo.0 as usize);
-                            let parameters =
-                                self.extract_function_parameters(&class_method.function);
-                            let return_type = self.extract_return_type(&class_method.function);
+            if let swc_ecma_ast::ClassMember::Method(class_method) = item {
+                if let swc_ecma_ast::PropName::Ident(ident) = &class_method.key {
+                    if ident.sym.as_ref() == function_name {
+                        let span = class_method.span;
+                        let (line, column) = converter.byte_offset_to_location(span.lo.0 as usize);
+                        let parameters = self.extract_function_parameters(&class_method.function);
+                        let return_type = self.extract_return_type(&class_method.function);
 
-                            *result = Some(FunctionInfo {
-                                name: function_name.to_string(),
-                                parameters,
-                                return_type,
-                                is_async: class_method.function.is_async,
-                                location: crate::models::Location {
-                                    file: file_path.to_string(),
-                                    line,
-                                    column: Some(column),
-                                },
-                            });
-                        }
+                        *result = Some(FunctionInfo {
+                            name: function_name.to_string(),
+                            parameters,
+                            return_type,
+                            is_async: class_method.function.is_async,
+                            location: crate::models::Location {
+                                file: file_path.to_string(),
+                                line,
+                                column: Some(column),
+                            },
+                        });
                     }
-                    _ => {}
-                },
-                _ => {}
+                }
             }
         }
     }
