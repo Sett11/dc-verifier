@@ -1,3 +1,4 @@
+use crate::pydantic::PydanticExtractor;
 use anyhow::Result;
 use dc_core::call_graph::{CallGraph, CallGraphBuilder};
 use std::path::{Path, PathBuf};
@@ -12,8 +13,9 @@ pub struct FastApiCallGraphBuilder {
 impl FastApiCallGraphBuilder {
     /// Creates a new builder
     pub fn new(app_path: PathBuf) -> Self {
+        let extractor = Box::new(PydanticExtractor::new());
         Self {
-            core_builder: CallGraphBuilder::new(),
+            core_builder: CallGraphBuilder::new().with_schema_extractor(extractor),
             app_path,
             verbose: false,
         }

@@ -15,6 +15,7 @@ impl ContractChecker {
         checker.add_rule(Box::new(crate::analyzers::TypeMismatchRule));
         checker.add_rule(Box::new(crate::analyzers::MissingFieldRule));
         checker.add_rule(Box::new(crate::analyzers::UnnormalizedDataRule));
+        checker.add_rule(Box::new(crate::analyzers::MissingSchemaRule));
 
         checker
     }

@@ -48,6 +48,8 @@ pub enum MismatchType {
     ValidationMismatch,
     /// Unnormalized data
     UnnormalizedData,
+    /// Missing schema validation (dict[str, Any] or any)
+    MissingSchema,
 }
 
 /// Problem severity

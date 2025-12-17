@@ -242,3 +242,68 @@ impl ContractRule for UnnormalizedDataRule {
         "unnormalized_data"
     }
 }
+
+/// Missing schema checking rule
+pub struct MissingSchemaRule;
+
+impl ContractRule for MissingSchemaRule {
+    fn check(&self, contract: &Contract) -> Vec<Mismatch> {
+        let mut mismatches = Vec::new();
+
+        // Check from_schema
+        if contract.from_schema.metadata.contains_key("missing_schema") {
+            mismatches.push(Mismatch {
+                mismatch_type: MismatchType::MissingSchema,
+                path: "".to_string(),
+                expected: TypeInfo {
+                    base_type: BaseType::Object,
+                    schema_ref: None,
+                    constraints: Vec::new(),
+                    optional: false,
+                },
+                actual: TypeInfo {
+                    base_type: BaseType::Any,
+                    schema_ref: None,
+                    constraints: Vec::new(),
+                    optional: false,
+                },
+                location: contract.from_schema.location.clone(),
+                message: format!(
+                    "Source schema '{}' is missing validation schema (dict[str, Any] or any)",
+                    contract.from_schema.name
+                ),
+            });
+        }
+
+        // Check to_schema
+        if contract.to_schema.metadata.contains_key("missing_schema") {
+            mismatches.push(Mismatch {
+                mismatch_type: MismatchType::MissingSchema,
+                path: "".to_string(),
+                expected: TypeInfo {
+                    base_type: BaseType::Object,
+                    schema_ref: None,
+                    constraints: Vec::new(),
+                    optional: false,
+                },
+                actual: TypeInfo {
+                    base_type: BaseType::Any,
+                    schema_ref: None,
+                    constraints: Vec::new(),
+                    optional: false,
+                },
+                location: contract.to_schema.location.clone(),
+                message: format!(
+                    "Target schema '{}' is missing validation schema (dict[str, Any] or any)",
+                    contract.to_schema.name
+                ),
+            });
+        }
+
+        mismatches
+    }
+
+    fn name(&self) -> &str {
+        "missing_schema"
+    }
+}

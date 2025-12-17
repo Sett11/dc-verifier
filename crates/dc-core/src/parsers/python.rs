@@ -320,6 +320,7 @@ impl PythonParser {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn walk_expr(
         &self,
         expr: &ast::Expr,
@@ -348,6 +349,7 @@ impl PythonParser {
                     calls.push(Call {
                         name,
                         arguments,
+                        generic_params: Vec::new(), // Python doesn't have generic params in calls
                         location,
                         caller,
                     });
@@ -433,6 +435,7 @@ impl PythonParser {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn call_name(&self, expr: &ast::Expr) -> Option<String> {
         match expr {
             ast::Expr::Name(name) => Some(name.id.to_string()),
@@ -509,6 +512,7 @@ impl PythonParser {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn collect_decorators(
         &self,
         stmt: &ast::Stmt,
@@ -604,6 +608,7 @@ impl PythonParser {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn get_decorator_name(&self, decorator: &ast::Expr) -> Option<String> {
         match decorator {
             ast::Expr::Attribute(attr) => self

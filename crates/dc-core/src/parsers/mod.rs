@@ -26,6 +26,8 @@ pub struct Call {
     pub name: String,
     /// Call arguments
     pub arguments: Vec<CallArgument>,
+    /// Generic type parameters (для useQuery<ResponseType, ErrorType>)
+    pub generic_params: Vec<crate::models::TypeInfo>,
     /// Location in code
     pub location: crate::models::Location,
     /// Name of function/method containing the call
@@ -39,4 +41,19 @@ pub struct CallArgument {
     pub parameter_name: Option<String>,
     /// Argument value (variable name or expression)
     pub value: String,
+}
+
+/// Information about a function found in module
+#[derive(Debug, Clone)]
+pub struct FunctionInfo {
+    /// Function name
+    pub name: String,
+    /// Function parameters
+    pub parameters: Vec<crate::call_graph::Parameter>,
+    /// Return type (if known)
+    pub return_type: Option<crate::models::TypeInfo>,
+    /// Whether function is async
+    pub is_async: bool,
+    /// Location in code
+    pub location: crate::models::Location,
 }

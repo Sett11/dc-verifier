@@ -247,14 +247,24 @@ impl<'a> ChainBuilder<'a> {
     }
 
     fn create_contract(&self, from: &Link, to: &Link) -> Contract {
-        Contract {
+        let mut contract = Contract {
             from_link_id: from.id.clone(),
             to_link_id: to.id.clone(),
             from_schema: from.schema_ref.clone(),
             to_schema: to.schema_ref.clone(),
             mismatches: Vec::new(),
             severity: Severity::Info,
+        };
+
+        // Check for missing schemas and set severity
+        let has_missing_schema = contract.from_schema.metadata.contains_key("missing_schema")
+            || contract.to_schema.metadata.contains_key("missing_schema");
+
+        if has_missing_schema {
+            contract.severity = Severity::Warning;
         }
+
+        contract
     }
 
     fn create_link_from_node(&self, node_id: NodeId, link_type: LinkType) -> Result<Link> {

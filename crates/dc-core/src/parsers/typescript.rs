@@ -1,5 +1,5 @@
 use crate::models::{Location, SchemaReference, SchemaType, TypeInfo};
-use crate::parsers::{Call, CallArgument, Import, LocationConverter};
+use crate::parsers::{Call, CallArgument, FunctionInfo, Import, LocationConverter};
 use anyhow::Result;
 use std::path::Path;
 use swc_common::{sync::Lrc, FileName, SourceMap};
@@ -113,12 +113,13 @@ impl TypeScriptParser {
         module: &Module,
         file_path: &str,
         converter: &LocationConverter,
+        source: &str,
     ) -> Vec<Call> {
         let mut calls = Vec::new();
         let mut context = Vec::new();
 
         for item in &module.body {
-            self.walk_module_item(item, &mut context, &mut calls, file_path, converter);
+            self.walk_module_item(item, &mut context, &mut calls, file_path, converter, source);
         }
 
         calls
@@ -132,16 +133,17 @@ impl TypeScriptParser {
         calls: &mut Vec<Call>,
         file_path: &str,
         converter: &LocationConverter,
+        source: &str,
     ) {
         match item {
             ModuleItem::Stmt(stmt) => {
-                self.walk_stmt(stmt, context, calls, file_path, converter);
+                self.walk_stmt(stmt, context, calls, file_path, converter, source);
             }
             ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export_decl)) => {
                 if let Decl::Fn(fn_decl) = &export_decl.decl {
                     context.push(fn_decl.ident.sym.as_ref().to_string());
                     if let Some(body) = &fn_decl.function.body {
-                        self.walk_block_stmt(body, context, calls, file_path, converter);
+                        self.walk_block_stmt(body, context, calls, file_path, converter, source);
                     }
                     context.pop();
                 }
@@ -158,53 +160,75 @@ impl TypeScriptParser {
         calls: &mut Vec<Call>,
         file_path: &str,
         converter: &LocationConverter,
+        source: &str,
     ) {
         match stmt {
             Stmt::Expr(expr_stmt) => {
-                self.walk_expr(&expr_stmt.expr, context, calls, file_path, converter);
+                self.walk_expr(
+                    &expr_stmt.expr,
+                    context,
+                    calls,
+                    file_path,
+                    converter,
+                    source,
+                );
             }
             Stmt::Return(ret_stmt) => {
                 if let Some(expr) = &ret_stmt.arg {
-                    self.walk_expr(expr, context, calls, file_path, converter);
+                    self.walk_expr(expr, context, calls, file_path, converter, source);
                 }
             }
             Stmt::If(if_stmt) => {
-                self.walk_expr(&if_stmt.test, context, calls, file_path, converter);
-                self.walk_stmt(&if_stmt.cons, context, calls, file_path, converter);
+                self.walk_expr(&if_stmt.test, context, calls, file_path, converter, source);
+                self.walk_stmt(&if_stmt.cons, context, calls, file_path, converter, source);
                 if let Some(alt) = &if_stmt.alt {
-                    self.walk_stmt(alt, context, calls, file_path, converter);
+                    self.walk_stmt(alt, context, calls, file_path, converter, source);
                 }
             }
             Stmt::While(while_stmt) => {
-                self.walk_expr(&while_stmt.test, context, calls, file_path, converter);
-                self.walk_stmt(&while_stmt.body, context, calls, file_path, converter);
+                self.walk_expr(
+                    &while_stmt.test,
+                    context,
+                    calls,
+                    file_path,
+                    converter,
+                    source,
+                );
+                self.walk_stmt(
+                    &while_stmt.body,
+                    context,
+                    calls,
+                    file_path,
+                    converter,
+                    source,
+                );
             }
             Stmt::For(for_stmt) => {
                 if let Some(init) = &for_stmt.init {
-                    self.walk_var_decl_or_expr(init, context, calls, file_path, converter);
+                    self.walk_var_decl_or_expr(init, context, calls, file_path, converter, source);
                 }
                 if let Some(test) = &for_stmt.test {
-                    self.walk_expr(test, context, calls, file_path, converter);
+                    self.walk_expr(test, context, calls, file_path, converter, source);
                 }
                 if let Some(update) = &for_stmt.update {
-                    self.walk_expr(update, context, calls, file_path, converter);
+                    self.walk_expr(update, context, calls, file_path, converter, source);
                 }
-                self.walk_stmt(&for_stmt.body, context, calls, file_path, converter);
+                self.walk_stmt(&for_stmt.body, context, calls, file_path, converter, source);
             }
             Stmt::Block(block_stmt) => {
-                self.walk_block_stmt(block_stmt, context, calls, file_path, converter);
+                self.walk_block_stmt(block_stmt, context, calls, file_path, converter, source);
             }
             Stmt::Decl(Decl::Fn(fn_decl)) => {
                 context.push(fn_decl.ident.sym.as_ref().to_string());
                 if let Some(body) = &fn_decl.function.body {
-                    self.walk_block_stmt(body, context, calls, file_path, converter);
+                    self.walk_block_stmt(body, context, calls, file_path, converter, source);
                 }
                 context.pop();
             }
             Stmt::Decl(Decl::Var(var_decl)) => {
                 for decl in &var_decl.decls {
                     if let Some(init) = &decl.init {
-                        self.walk_expr(init, context, calls, file_path, converter);
+                        self.walk_expr(init, context, calls, file_path, converter, source);
                     }
                 }
             }
@@ -220,9 +244,10 @@ impl TypeScriptParser {
         calls: &mut Vec<Call>,
         file_path: &str,
         converter: &LocationConverter,
+        source: &str,
     ) {
         for stmt in &block.stmts {
-            self.walk_stmt(stmt, context, calls, file_path, converter);
+            self.walk_stmt(stmt, context, calls, file_path, converter, source);
         }
     }
 
@@ -234,17 +259,18 @@ impl TypeScriptParser {
         calls: &mut Vec<Call>,
         file_path: &str,
         converter: &LocationConverter,
+        source: &str,
     ) {
         match init {
             VarDeclOrExpr::VarDecl(var_decl) => {
                 for decl in &var_decl.decls {
                     if let Some(init) = &decl.init {
-                        self.walk_expr(init, context, calls, file_path, converter);
+                        self.walk_expr(init, context, calls, file_path, converter, source);
                     }
                 }
             }
             VarDeclOrExpr::Expr(expr) => {
-                self.walk_expr(expr, context, calls, file_path, converter);
+                self.walk_expr(expr, context, calls, file_path, converter, source);
             }
         }
     }
@@ -257,11 +283,13 @@ impl TypeScriptParser {
         calls: &mut Vec<Call>,
         file_path: &str,
         converter: &LocationConverter,
+        source: &str,
     ) {
         match expr {
             Expr::Call(call_expr) => {
                 if let Some(name) = self.call_name(&call_expr.callee) {
                     let arguments = self.extract_call_arguments(call_expr);
+                    let generic_params = self.extract_generic_params_from_call(call_expr, source);
                     let span = call_expr.span;
                     let (line, column) = converter.byte_offset_to_location(span.lo.0 as usize);
 
@@ -274,6 +302,7 @@ impl TypeScriptParser {
                     calls.push(Call {
                         name,
                         arguments,
+                        generic_params,
                         location: Location {
                             file: file_path.to_string(),
                             line,
@@ -285,7 +314,7 @@ impl TypeScriptParser {
 
                 // Recursively traverse arguments
                 for arg in &call_expr.args {
-                    self.walk_expr_or_spread(arg, context, calls, file_path, converter);
+                    self.walk_expr_or_spread(arg, context, calls, file_path, converter, source);
                 }
             }
             Expr::Member(member_expr) => {
@@ -295,16 +324,25 @@ impl TypeScriptParser {
                     calls,
                     file_path,
                     converter,
+                    source,
                 );
             }
             Expr::Bin(bin_expr) => {
-                self.walk_expr(bin_expr.left.as_ref(), context, calls, file_path, converter);
+                self.walk_expr(
+                    bin_expr.left.as_ref(),
+                    context,
+                    calls,
+                    file_path,
+                    converter,
+                    source,
+                );
                 self.walk_expr(
                     bin_expr.right.as_ref(),
                     context,
                     calls,
                     file_path,
                     converter,
+                    source,
                 );
             }
             Expr::Unary(unary_expr) => {
@@ -314,6 +352,7 @@ impl TypeScriptParser {
                     calls,
                     file_path,
                     converter,
+                    source,
                 );
             }
             Expr::Cond(cond_expr) => {
@@ -323,6 +362,7 @@ impl TypeScriptParser {
                     calls,
                     file_path,
                     converter,
+                    source,
                 );
                 self.walk_expr(
                     cond_expr.cons.as_ref(),
@@ -330,8 +370,16 @@ impl TypeScriptParser {
                     calls,
                     file_path,
                     converter,
+                    source,
                 );
-                self.walk_expr(cond_expr.alt.as_ref(), context, calls, file_path, converter);
+                self.walk_expr(
+                    cond_expr.alt.as_ref(),
+                    context,
+                    calls,
+                    file_path,
+                    converter,
+                    source,
+                );
             }
             Expr::Assign(assign_expr) => {
                 self.walk_expr(
@@ -340,6 +388,7 @@ impl TypeScriptParser {
                     calls,
                     file_path,
                     converter,
+                    source,
                 );
             }
             _ => {}
@@ -354,11 +403,13 @@ impl TypeScriptParser {
         calls: &mut Vec<Call>,
         file_path: &str,
         converter: &LocationConverter,
+        source: &str,
     ) {
-        self.walk_expr(&arg.expr, context, calls, file_path, converter);
+        self.walk_expr(&arg.expr, context, calls, file_path, converter, source);
     }
 
     /// Extracts function name from Callee
+    #[allow(clippy::only_used_in_recursion)]
     fn call_name(&self, callee: &Callee) -> Option<String> {
         match callee {
             Callee::Expr(expr) => match expr.as_ref() {
@@ -382,6 +433,226 @@ impl TypeScriptParser {
             },
             Callee::Super(_) => Some("super".to_string()),
             Callee::Import(_) => Some("import".to_string()),
+        }
+    }
+
+    /// Extracts generic type parameters from a call expression
+    ///
+    /// In SWC AST for TypeScript, generic parameters in function calls like `useQuery<ResponseType>()`
+    /// are not directly stored in CallExpr. We need to parse them from the source code
+    /// or use type information.
+    ///
+    /// This method attempts to extract generic parameters by:
+    /// 1. Checking if callee has type parameters (for future enhancement)
+    /// 2. Parsing source code around the call (requires source access)
+    fn extract_generic_params_from_call(
+        &self,
+        call_expr: &CallExpr,
+        source: &str,
+    ) -> Vec<crate::models::TypeInfo> {
+        // Parse generic parameters from source code
+        let type_names = self.parse_generic_params_from_source(call_expr, source);
+
+        // Convert type names to TypeInfo
+        // Use a dummy file_path and line - they will be set properly when we have converter
+        let file_path = "";
+        let line = 0;
+
+        type_names
+            .iter()
+            .filter_map(|type_name| {
+                self.parse_type_name_to_type_info(type_name, file_path, line)
+                    .ok()
+            })
+            .collect()
+    }
+
+    /// Parses generic type parameters from source code around a call expression
+    /// Example: useQuery<UserResponse, Error>() -> ["UserResponse", "Error"]
+    fn parse_generic_params_from_source(&self, call_expr: &CallExpr, source: &str) -> Vec<String> {
+        // Get the span of the callee to find where the function name ends
+        let callee_span = match &call_expr.callee {
+            Callee::Expr(expr) => {
+                // For Box<Expr>, we need to match on the expression type to get span
+                match expr.as_ref() {
+                    Expr::Ident(ident) => ident.span,
+                    Expr::Member(member) => member.span,
+                    _ => {
+                        // For other expression types, use the call_expr span as fallback
+                        // This is not ideal but will work for most cases
+                        return Vec::new();
+                    }
+                }
+            }
+            Callee::Super(_) => return Vec::new(), // Super calls don't have generics
+            Callee::Import(_) => return Vec::new(), // Import calls don't have generics
+        };
+
+        // Find the end of the callee (where the function name ends)
+        let callee_end = callee_span.hi.0 as usize;
+
+        // Look for '<' after the callee
+        if callee_end >= source.len() {
+            return Vec::new();
+        }
+
+        let after_callee = &source[callee_end..];
+        let mut chars = after_callee.chars().peekable();
+
+        // Skip whitespace
+        while let Some(&ch) = chars.peek() {
+            if ch.is_whitespace() {
+                chars.next();
+            } else {
+                break;
+            }
+        }
+
+        // Check if next character is '<'
+        if chars.peek() != Some(&'<') {
+            return Vec::new(); // No generic parameters
+        }
+        chars.next(); // Skip '<'
+
+        // Parse generic parameters
+        let mut params = Vec::new();
+        let mut current_param = String::new();
+        let mut depth = 1; // Track nesting level for nested generics like Promise<Array<T>>
+        let mut in_string = false;
+        let mut string_char = None;
+
+        while let Some(ch) = chars.next() {
+            match ch {
+                '<' if !in_string => {
+                    depth += 1;
+                    current_param.push(ch);
+                }
+                '>' if !in_string => {
+                    depth -= 1;
+                    if depth == 0 {
+                        // End of generic parameters
+                        if !current_param.trim().is_empty() {
+                            params.push(current_param.trim().to_string());
+                        }
+                        break;
+                    }
+                    current_param.push(ch);
+                }
+                ',' if !in_string && depth == 1 => {
+                    // Parameter separator at top level
+                    if !current_param.trim().is_empty() {
+                        params.push(current_param.trim().to_string());
+                    }
+                    current_param.clear();
+                }
+                '"' | '\'' if !in_string => {
+                    in_string = true;
+                    string_char = Some(ch);
+                    current_param.push(ch);
+                }
+                ch if in_string && Some(ch) == string_char => {
+                    in_string = false;
+                    string_char = None;
+                    current_param.push(ch);
+                }
+                _ => {
+                    current_param.push(ch);
+                }
+            }
+        }
+
+        params
+    }
+
+    /// Converts a parsed type name string to TypeInfo
+    /// Handles simple types, qualified names, generics, unions, etc.
+    fn parse_type_name_to_type_info(
+        &self,
+        type_name: &str,
+        file_path: &str,
+        line: usize,
+    ) -> Result<crate::models::TypeInfo> {
+        let mut type_name = type_name.trim().to_string();
+
+        // Handle union types: take the first type
+        if let Some(pipe_pos) = type_name.find('|') {
+            type_name = type_name[..pipe_pos].trim().to_string();
+        }
+
+        // Handle intersection types: take the first type
+        if let Some(amp_pos) = type_name.find('&') {
+            type_name = type_name[..amp_pos].trim().to_string();
+        }
+
+        // Handle arrays: UserResponse[] -> UserResponse
+        let is_array = type_name.ends_with("[]");
+        if is_array {
+            type_name = type_name[..type_name.len() - 2].trim().to_string();
+        }
+
+        // Handle optional: UserResponse? -> UserResponse
+        let is_optional = type_name.ends_with('?');
+        if is_optional {
+            type_name = type_name[..type_name.len() - 1].trim().to_string();
+        }
+
+        // Handle generic types: Promise<UserResponse> -> UserResponse
+        type_name = self.extract_inner_type_from_generic(&type_name);
+
+        // Handle qualified names: api.UserResponse -> UserResponse
+        let final_type_name = self.parse_qualified_name(&type_name);
+
+        // Create SchemaReference
+        let schema_ref = Some(crate::models::SchemaReference {
+            name: final_type_name.clone(),
+            schema_type: crate::models::SchemaType::TypeScript,
+            location: crate::models::Location {
+                file: file_path.to_string(),
+                line,
+                column: None,
+            },
+            metadata: std::collections::HashMap::new(),
+        });
+
+        // Determine base type
+        let base_type = if is_array {
+            crate::models::BaseType::Array
+        } else {
+            crate::models::BaseType::Object
+        };
+
+        Ok(crate::models::TypeInfo {
+            base_type,
+            schema_ref,
+            constraints: Vec::new(),
+            optional: is_optional,
+        })
+    }
+
+    /// Extracts inner type from generic type like Promise<T>, Array<T>
+    fn extract_inner_type_from_generic(&self, type_name: &str) -> String {
+        // Look for pattern: TypeName<InnerType>
+        if let Some(open_pos) = type_name.find('<') {
+            if let Some(close_pos) = type_name.rfind('>') {
+                if close_pos > open_pos {
+                    // Extract inner type, handling nested generics
+                    let inner = &type_name[open_pos + 1..close_pos];
+                    // Find the last '>' that matches the first '<'
+                    // For now, simple approach: take everything between first < and last >
+                    return inner.trim().to_string();
+                }
+            }
+        }
+        type_name.to_string()
+    }
+
+    /// Parses qualified name and returns the simple name
+    /// api.UserResponse -> UserResponse
+    fn parse_qualified_name(&self, type_name: &str) -> String {
+        if let Some(last_dot) = type_name.rfind('.') {
+            type_name[last_dot + 1..].to_string()
+        } else {
+            type_name.to_string()
         }
     }
 
@@ -968,6 +1239,7 @@ impl TypeScriptParser {
     }
 
     /// Converts TsEntityName to string
+    #[allow(clippy::only_used_in_recursion)]
     fn ts_entity_name_to_string(&self, entity_name: &swc_ecma_ast::TsEntityName) -> String {
         match entity_name {
             swc_ecma_ast::TsEntityName::Ident(ident) => ident.sym.as_ref().to_string(),
@@ -1116,6 +1388,224 @@ impl TypeScriptParser {
         }
     }
 
+    /// Finds a function in module by name (supports all function types)
+    ///
+    /// Searches for:
+    /// - Regular function declarations
+    /// - Arrow functions (const/let)
+    /// - IIFE (Immediately Invoked Function Expression)
+    /// - Class methods
+    /// - Export functions
+    pub fn find_function_by_name(
+        &self,
+        module: &Module,
+        function_name: &str,
+        file_path: &str,
+        converter: &LocationConverter,
+    ) -> Option<FunctionInfo> {
+        let mut result = None;
+
+        for item in &module.body {
+            self.walk_for_function_by_name(item, function_name, &mut result, file_path, converter);
+        }
+
+        result
+    }
+
+    /// Traverses AST to find a function by name
+    fn walk_for_function_by_name(
+        &self,
+        item: &ModuleItem,
+        function_name: &str,
+        result: &mut Option<FunctionInfo>,
+        file_path: &str,
+        converter: &LocationConverter,
+    ) {
+        match item {
+            // 1. Regular function declarations
+            ModuleItem::Stmt(Stmt::Decl(Decl::Fn(fn_decl))) => {
+                if fn_decl.ident.sym.as_ref() == function_name {
+                    let span = fn_decl.ident.span;
+                    let (line, column) = converter.byte_offset_to_location(span.lo.0 as usize);
+                    let parameters = self.extract_function_parameters(&fn_decl.function);
+                    let return_type = self.extract_return_type(&fn_decl.function);
+
+                    *result = Some(FunctionInfo {
+                        name: function_name.to_string(),
+                        parameters,
+                        return_type,
+                        is_async: fn_decl.function.is_async,
+                        location: crate::models::Location {
+                            file: file_path.to_string(),
+                            line,
+                            column: Some(column),
+                        },
+                    });
+                }
+            }
+
+            // 2. Export functions
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export_decl)) => {
+                if let Decl::Fn(fn_decl) = &export_decl.decl {
+                    if fn_decl.ident.sym.as_ref() == function_name {
+                        let span = fn_decl.ident.span;
+                        let (line, column) = converter.byte_offset_to_location(span.lo.0 as usize);
+                        let parameters = self.extract_function_parameters(&fn_decl.function);
+                        let return_type = self.extract_return_type(&fn_decl.function);
+
+                        *result = Some(FunctionInfo {
+                            name: function_name.to_string(),
+                            parameters,
+                            return_type,
+                            is_async: fn_decl.function.is_async,
+                            location: crate::models::Location {
+                                file: file_path.to_string(),
+                                line,
+                                column: Some(column),
+                            },
+                        });
+                    }
+                }
+            }
+
+            // 3. Arrow functions (const/let)
+            ModuleItem::Stmt(Stmt::Decl(Decl::Var(var_decl))) => {
+                for decl in &var_decl.decls {
+                    if let Pat::Ident(ident) = &decl.name {
+                        if ident.id.sym.as_ref() == function_name {
+                            if let Some(init) = &decl.init {
+                                if let Expr::Arrow(arrow_fn) = init.as_ref() {
+                                    let span = arrow_fn.span;
+                                    let (line, column) =
+                                        converter.byte_offset_to_location(span.lo.0 as usize);
+                                    let parameters =
+                                        self.extract_arrow_function_parameters(arrow_fn);
+                                    let return_type = self.extract_arrow_return_type(arrow_fn);
+
+                                    *result = Some(FunctionInfo {
+                                        name: function_name.to_string(),
+                                        parameters,
+                                        return_type,
+                                        is_async: arrow_fn.is_async,
+                                        location: crate::models::Location {
+                                            file: file_path.to_string(),
+                                            line,
+                                            column: Some(column),
+                                        },
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. IIFE - check in expressions
+            ModuleItem::Stmt(Stmt::Expr(expr_stmt)) => {
+                self.walk_expr_for_iife(expr_stmt, function_name, result, file_path, converter);
+            }
+
+            // 5. Class methods
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(class_decl))) => {
+                self.walk_class_for_method(class_decl, function_name, result, file_path, converter);
+            }
+
+            _ => {}
+        }
+    }
+
+    /// Handles IIFE (Immediately Invoked Function Expression) in expressions
+    /// IIFE can be: (function name() { ... })() or (() => { ... })()
+    fn walk_expr_for_iife(
+        &self,
+        expr_stmt: &ExprStmt,
+        function_name: &str,
+        result: &mut Option<FunctionInfo>,
+        file_path: &str,
+        converter: &LocationConverter,
+    ) {
+        // IIFE pattern: (function() { ... })() or (() => { ... })()
+        if let Expr::Call(call_expr) = expr_stmt.expr.as_ref() {
+            if let Callee::Expr(callee_expr) = &call_expr.callee {
+                match callee_expr.as_ref() {
+                    Expr::Fn(fn_expr) => {
+                        // Named IIFE: (function name() { ... })()
+                        if let Some(ident) = &fn_expr.ident {
+                            if ident.sym.as_ref() == function_name {
+                                let span = ident.span;
+                                let (line, column) =
+                                    converter.byte_offset_to_location(span.lo.0 as usize);
+                                let parameters =
+                                    self.extract_function_parameters(&fn_expr.function);
+                                let return_type = self.extract_return_type(&fn_expr.function);
+
+                                *result = Some(FunctionInfo {
+                                    name: function_name.to_string(),
+                                    parameters,
+                                    return_type,
+                                    is_async: fn_expr.function.is_async,
+                                    location: crate::models::Location {
+                                        file: file_path.to_string(),
+                                        line,
+                                        column: Some(column),
+                                    },
+                                });
+                            }
+                        }
+                    }
+                    Expr::Arrow(_arrow_fn) => {
+                        // Anonymous IIFE: (() => { ... })()
+                        // For anonymous IIFE, we can't match by name
+                        // This would require context or location-based matching
+                        // For now, skip anonymous IIFE
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Searches for a method in a class declaration
+    fn walk_class_for_method(
+        &self,
+        class_decl: &swc_ecma_ast::ClassDecl,
+        function_name: &str,
+        result: &mut Option<FunctionInfo>,
+        file_path: &str,
+        converter: &LocationConverter,
+    ) {
+        for item in &class_decl.class.body {
+            match item {
+                swc_ecma_ast::ClassMember::Method(class_method) => match &class_method.key {
+                    swc_ecma_ast::PropName::Ident(ident) => {
+                        if ident.sym.as_ref() == function_name {
+                            let span = class_method.span;
+                            let (line, column) =
+                                converter.byte_offset_to_location(span.lo.0 as usize);
+                            let parameters =
+                                self.extract_function_parameters(&class_method.function);
+                            let return_type = self.extract_return_type(&class_method.function);
+
+                            *result = Some(FunctionInfo {
+                                name: function_name.to_string(),
+                                parameters,
+                                return_type,
+                                is_async: class_method.function.is_async,
+                                location: crate::models::Location {
+                                    file: file_path.to_string(),
+                                    line,
+                                    column: Some(column),
+                                },
+                            });
+                        }
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+    }
+
     /// Extracts function parameters
     fn extract_function_parameters(
         &self,
@@ -1184,7 +1674,102 @@ impl TypeScriptParser {
 
     /// Converts TsTypeAnn to TypeInfo
     fn ts_type_ann_to_type_info(&self, type_ann: &swc_ecma_ast::TsTypeAnn) -> TypeInfo {
-        let base_type = self.ts_type_to_base_type(&type_ann.type_ann);
+        let ts_type = &type_ann.type_ann;
+
+        // Check if type is Promise<T> and extract inner type
+        if self.is_promise_type(ts_type) {
+            if let Some(inner_type) = self.extract_promise_inner_type(ts_type) {
+                return self.ts_type_to_type_info(inner_type);
+            }
+        }
+
+        // Regular processing
+        let base_type = self.ts_type_to_base_type(ts_type);
+        TypeInfo {
+            base_type,
+            schema_ref: None,
+            constraints: Vec::new(),
+            optional: false,
+        }
+    }
+
+    /// Checks if type is Promise or PromiseLike
+    fn is_promise_type(&self, ts_type: &swc_ecma_ast::TsType) -> bool {
+        if let swc_ecma_ast::TsType::TsTypeRef(type_ref) = ts_type {
+            let type_name = self.ts_entity_name_to_string(&type_ref.type_name);
+            return type_name == "Promise" || type_name == "PromiseLike";
+        }
+        false
+    }
+
+    /// Extracts inner type from Promise<T> or PromiseLike<T>
+    fn extract_promise_inner_type<'a>(
+        &self,
+        ts_type: &'a swc_ecma_ast::TsType,
+    ) -> Option<&'a swc_ecma_ast::TsType> {
+        if let swc_ecma_ast::TsType::TsTypeRef(type_ref) = ts_type {
+            if self.is_promise_type(ts_type) {
+                // Extract generic parameter
+                // In SWC, type_params.params is Vec<Box<TsType>>
+                if let Some(type_params) = &type_ref.type_params {
+                    if let Some(first_param) = type_params.params.first() {
+                        // first_param is Box<TsType>, return the inner type
+                        return Some(first_param.as_ref());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Converts TsType to TypeInfo (recursive version for Promise extraction)
+    fn ts_type_to_type_info(&self, ts_type: &swc_ecma_ast::TsType) -> TypeInfo {
+        // Check for Promise<T>
+        if let Some(inner_type) = self.extract_promise_inner_type(ts_type) {
+            return self.ts_type_to_type_info(inner_type);
+        }
+
+        // Handle TsTypeRef with generic parameters
+        if let swc_ecma_ast::TsType::TsTypeRef(type_ref) = ts_type {
+            let base_type = crate::models::BaseType::Object;
+
+            // If there are generic parameters, try to create schema reference from first param
+            let schema_ref = if let Some(type_params) = &type_ref.type_params {
+                if let Some(first_param) = type_params.params.first() {
+                    // first_param is Box<TsType>
+                    if let swc_ecma_ast::TsType::TsTypeRef(generic_ref) = first_param.as_ref() {
+                        let type_name = self.ts_entity_name_to_string(&generic_ref.type_name);
+                        // Create a basic schema reference
+                        Some(crate::models::SchemaReference {
+                            name: type_name,
+                            schema_type: crate::models::SchemaType::TypeScript,
+                            location: crate::models::Location {
+                                file: String::new(), // Will be filled by caller
+                                line: 0,
+                                column: None,
+                            },
+                            metadata: std::collections::HashMap::new(),
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            return TypeInfo {
+                base_type,
+                schema_ref,
+                constraints: Vec::new(),
+                optional: false,
+            };
+        }
+
+        // Fallback to base type conversion
+        let base_type = self.ts_type_to_base_type(ts_type);
         TypeInfo {
             base_type,
             schema_ref: None,
@@ -1356,8 +1941,8 @@ function test() {
         let test_file = temp_dir.path().join("test.ts");
         std::fs::write(&test_file, source).unwrap();
 
-        let (module, _, converter) = parser.parse_file(&test_file).unwrap();
-        let calls = parser.extract_calls(&module, test_file.to_str().unwrap(), &converter);
+        let (module, source, converter) = parser.parse_file(&test_file).unwrap();
+        let calls = parser.extract_calls(&module, test_file.to_str().unwrap(), &converter, &source);
 
         assert!(calls.len() >= 2);
         assert!(calls.iter().any(|c| c.name == "doSomething"));
@@ -1601,5 +2186,27 @@ type StringContainer = Container<string>;
         assert!(schemas.len() >= 2);
         assert!(schemas.iter().any(|s| s.name == "Container"));
         assert!(schemas.iter().any(|s| s.name == "StringContainer"));
+    }
+
+    #[test]
+    fn test_generic_params_structure() {
+        // Test to understand SWC AST structure for generic parameters
+        let parser = TypeScriptParser::new();
+        let source = r#"
+        useQuery<UserResponse, Error>({ queryKey: ['user'], queryFn: () => {} });
+        useMutation<ResponseType, ErrorType, VariablesType>({ mutationFn: () => {} });
+        "#;
+        let temp_dir = TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("test.ts");
+        std::fs::write(&test_file, source).unwrap();
+
+        let (module, source, converter) = parser.parse_file(&test_file).unwrap();
+        let calls = parser.extract_calls(&module, test_file.to_str().unwrap(), &converter, &source);
+
+        // This test helps us understand the structure
+        // Generic params should be extracted in the future
+        assert!(calls.len() >= 2);
+        assert!(calls.iter().any(|c| c.name == "useQuery"));
+        assert!(calls.iter().any(|c| c.name == "useMutation"));
     }
 }

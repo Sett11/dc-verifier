@@ -1,4 +1,5 @@
 use anyhow::Result;
+use dc_core::call_graph::extractor::PydanticSchemaExtractor;
 use dc_core::models::{Location, SchemaReference, SchemaType};
 use dc_core::parsers::{LocationConverter, PythonParser};
 use pyo3::prelude::*;
@@ -202,5 +203,92 @@ impl PydanticExtractor {
 impl Default for PydanticExtractor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl PydanticSchemaExtractor for PydanticExtractor {
+    fn extract_json_schema(&self, model_name: &str, file_path: &Path) -> Result<Option<String>> {
+        #[allow(deprecated)]
+        Python::with_gil(|py| -> Result<Option<String>> {
+            // Try to load the module from file_path
+            let module_path = file_path.parent().and_then(|p| p.to_str()).unwrap_or(".");
+            let file_stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+
+            // Add parent directory to sys.path if needed
+            let sys = match py.import("sys") {
+                Ok(s) => s,
+                Err(_) => return Ok(None), // Python not available
+            };
+            let path_attr = sys.getattr("path")?;
+            let path = match path_attr.cast::<pyo3::types::PyList>() {
+                Ok(p) => p,
+                Err(_) => return Ok(None),
+            };
+            if path.contains(module_path).unwrap_or(false) {
+                // Already in path
+            } else if path.insert(0, module_path).is_err() {
+                return Ok(None);
+            }
+
+            // Try to import the module
+            let module_name = file_stem;
+            let module = match py.import(module_name) {
+                Ok(m) => m,
+                Err(_) => {
+                    // Try to import from parent directory
+                    if let Some(parent) = file_path.parent() {
+                        if let Some(parent_name) = parent.file_name().and_then(|n| n.to_str()) {
+                            let full_name = format!("{}.{}", parent_name, module_name);
+                            match py.import(&full_name) {
+                                Ok(m) => m,
+                                Err(_) => return Ok(None),
+                            }
+                        } else {
+                            return Ok(None);
+                        }
+                    } else {
+                        return Ok(None);
+                    }
+                }
+            };
+
+            // Try to get the class from the module
+            let model_class = match module.getattr(model_name) {
+                Ok(cls) => cls,
+                Err(_) => return Ok(None),
+            };
+
+            // Check if it's a Pydantic BaseModel
+            let pydantic = match py.import("pydantic") {
+                Ok(p) => p,
+                Err(_) => return Ok(None), // Pydantic not available
+            };
+            let base_model = match pydantic.getattr("BaseModel") {
+                Ok(bm) => bm,
+                Err(_) => return Ok(None),
+            };
+            let is_base_model = model_class.hasattr("model_json_schema").unwrap_or(false)
+                || model_class
+                    .call_method0("__mro__")
+                    .and_then(|mro| {
+                        let mro_list = mro.cast::<pyo3::types::PyList>()?;
+                        // Check if base_model is in the MRO list
+                        let base_model_obj: pyo3::Py<pyo3::types::PyAny> =
+                            base_model.clone().unbind();
+                        mro_list.contains(base_model_obj)
+                    })
+                    .unwrap_or(false);
+
+            if !is_base_model {
+                return Ok(None);
+            }
+
+            // Extract JSON schema
+            if let Some(schema_str) = Self::serialize_schema(py, &model_class) {
+                Ok(Some(schema_str))
+            } else {
+                Ok(None)
+            }
+        })
     }
 }

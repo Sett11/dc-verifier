@@ -97,7 +97,7 @@ impl TypeScriptCallGraphBuilder {
         self.current_depth += 1;
 
         let result = (|| -> Result<()> {
-            let (module, _source, converter) = self
+            let (module, source, converter) = self
                 .parser
                 .parse_file(&normalized)
                 .with_context(|| format!("Failed to parse {:?}", normalized))?;
@@ -124,7 +124,7 @@ impl TypeScriptCallGraphBuilder {
             // Extract calls
             let calls = self
                 .parser
-                .extract_calls(&module, &file_path_str, &converter);
+                .extract_calls(&module, &file_path_str, &converter, &source);
             for call in &calls {
                 if let Err(err) = self.process_call(module_node, call, &normalized) {
                     eprintln!(
@@ -347,6 +347,8 @@ impl TypeScriptCallGraphBuilder {
                 path: url,
                 method,
                 location: call.location.clone(),
+                request_type: None,
+                response_type: None,
             });
         }
 
@@ -360,6 +362,8 @@ impl TypeScriptCallGraphBuilder {
                         path,
                         method,
                         location: call.location.clone(),
+                        request_type: None,
+                        response_type: None,
                     });
                 }
             }
@@ -377,6 +381,8 @@ impl TypeScriptCallGraphBuilder {
                             path,
                             method,
                             location: call.location.clone(),
+                            request_type: None,
+                            response_type: None,
                         });
                     }
                 }
@@ -396,15 +402,136 @@ impl TypeScriptCallGraphBuilder {
                 } else {
                     HttpMethod::Get
                 };
+
+                // Try to extract types from query hook (future enhancement)
+                let (request_type, response_type) = self.extract_types_from_query_hook(call);
+
                 return Some(ApiCallInfo {
                     path,
                     method,
                     location: call.location.clone(),
+                    request_type,
+                    response_type,
                 });
             }
         }
 
         None
+    }
+
+    /// Extracts types from TanStack Query hooks (useQuery, useMutation)
+    ///
+    /// For useQuery<ResponseType, ErrorType>:
+    /// - First parameter = ResponseType (response type)
+    /// - Second parameter = ErrorType (optional, ignored for now)
+    ///
+    /// For useMutation<ResponseType, ErrorType, VariablesType>:
+    /// - First parameter = ResponseType (response type)
+    /// - Second parameter = ErrorType (optional, ignored for now)
+    /// - Third parameter = VariablesType (request type)
+    fn extract_types_from_query_hook(
+        &self,
+        call: &Call,
+    ) -> (
+        Option<dc_core::models::TypeInfo>,
+        Option<dc_core::models::TypeInfo>,
+    ) {
+        match call.generic_params.len() {
+            0 => (None, None),
+            1 => {
+                // Only response type provided
+                let response = call.generic_params.first().cloned();
+                (None, response)
+            }
+            2 => {
+                // useQuery case: ResponseType, ErrorType
+                let response = call.generic_params.first().cloned();
+                // Error type is ignored for now
+                (None, response)
+            }
+            3 => {
+                // useMutation case: ResponseType, ErrorType, VariablesType
+                let response = call.generic_params.first().cloned();
+                let request = call.generic_params.get(2).cloned(); // VariablesType is the third param
+                (request, response)
+            }
+            _ => {
+                // More than 3 params - take first as response, last as request
+                let response = call.generic_params.first().cloned();
+                let request = call.generic_params.last().cloned();
+                (request, response)
+            }
+        }
+    }
+
+    /// Finds corresponding service file for a queries file
+    /// For example: features/auth/api/authQueries.ts -> features/auth/api/authService.ts
+    fn find_service_file(&self, queries_file: &Path) -> Option<PathBuf> {
+        let file_stem = queries_file.file_stem()?.to_str()?;
+        let service_name = file_stem.replace("Queries", "Service");
+
+        // Search in src_paths
+        for src_path in &self.src_paths {
+            let candidate = src_path.join(format!("{}.ts", service_name));
+            if candidate.exists() {
+                return Some(candidate);
+            }
+            // Also try with .tsx extension
+            let candidate_tsx = src_path.join(format!("{}.tsx", service_name));
+            if candidate_tsx.exists() {
+                return Some(candidate_tsx);
+            }
+        }
+
+        // Also try in the same directory as queries file
+        if let Some(parent) = queries_file.parent() {
+            let candidate = parent.join(format!("{}.ts", service_name));
+            if candidate.exists() {
+                return Some(candidate);
+            }
+            let candidate_tsx = parent.join(format!("{}.tsx", service_name));
+            if candidate_tsx.exists() {
+                return Some(candidate_tsx);
+            }
+        }
+
+        None
+    }
+
+    /// Extracts request and response types from a service function
+    fn extract_service_types(
+        &self,
+        service_file: &Path,
+        function_name: &str,
+    ) -> Result<(
+        Option<dc_core::models::TypeInfo>,
+        Option<dc_core::models::TypeInfo>,
+    )> {
+        // 1. Parse the service file
+        let (module, _source, converter) = self.parser.parse_file(service_file)?;
+        let file_path_str = service_file.to_string_lossy().to_string();
+
+        // 2. Find the function in the module
+        let function_info =
+            self.parser
+                .find_function_by_name(&module, function_name, &file_path_str, &converter);
+
+        match function_info {
+            Some(info) => {
+                // 3. Extract types
+                // Request type = first parameter of the function
+                let request_type = info.parameters.first().map(|param| param.type_info.clone());
+
+                // Response type = return type (already handles Promise<T>)
+                let response_type = info.return_type;
+
+                Ok((request_type, response_type))
+            }
+            None => {
+                // Function not found
+                Ok((None, None))
+            }
+        }
     }
 
     /// Extracts HTTP method from fetch options object
@@ -437,9 +564,67 @@ impl TypeScriptCallGraphBuilder {
         file_path: &Path,
         _file_path_str: &str,
     ) -> Result<()> {
-        // Create a virtual handler function node for this route
-        // In a real implementation, we'd try to find the actual handler
-        let handler_node = self.get_or_create_function_node("api_handler", file_path);
+        // Priority order for type extraction:
+        // 1. Try to find corresponding service file and extract types from function
+        // 2. Use types from generic parameters of API call (useQuery/useMutation)
+        // 3. Fallback to default handler without types
+
+        let (request_type, response_type) =
+            if let Some(service_file) = self.find_service_file(file_path) {
+                // Try to extract types from service file
+                // Look for common service function names
+                let function_names = ["api_handler", "handler", "service", "fetchData"];
+                let mut found_types = (None, None);
+
+                for func_name in &function_names {
+                    if let Ok(types) = self.extract_service_types(&service_file, func_name) {
+                        if types.0.is_some() || types.1.is_some() {
+                            found_types = types;
+                            break;
+                        }
+                    }
+                }
+
+                found_types
+            } else {
+                // No service file found, use types from API call generic params
+                (api_call.request_type, api_call.response_type)
+            };
+
+        // Create handler with types if available
+        let handler_node = match (request_type, response_type) {
+            (Some(req_type), Some(resp_type)) => {
+                // Both request and response types available
+                self.get_or_create_function_node_with_details(
+                    "api_handler",
+                    file_path,
+                    0,
+                    vec![dc_core::call_graph::Parameter {
+                        name: "request".to_string(),
+                        type_info: req_type,
+                        optional: false,
+                        default_value: None,
+                    }],
+                    Some(resp_type),
+                    false,
+                )
+            }
+            (None, Some(resp_type)) => {
+                // Only response type available
+                self.get_or_create_function_node_with_details(
+                    "api_handler",
+                    file_path,
+                    0,
+                    Vec::new(),
+                    Some(resp_type),
+                    false,
+                )
+            }
+            _ => {
+                // Fallback to existing code
+                self.get_or_create_function_node("api_handler", file_path)
+            }
+        };
         let location = api_call.location.clone();
 
         let route_node = NodeId::from(self.graph.add_node(CallNode::Route {
@@ -674,6 +859,7 @@ impl TypeScriptCallGraphBuilder {
         format!("{}::{}", Self::normalize_path(path).to_string_lossy(), name)
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn find_ts_files(&self, dir: &PathBuf, files: &mut Vec<PathBuf>) -> Result<()> {
         if dir.is_file() {
             if let Some(ext) = dir.extension() {
@@ -701,4 +887,8 @@ struct ApiCallInfo {
     path: String,
     method: HttpMethod,
     location: Location,
+    /// Optional request type (for future use with generic parameters)
+    request_type: Option<dc_core::models::TypeInfo>,
+    /// Optional response type (for future use with generic parameters)
+    response_type: Option<dc_core::models::TypeInfo>,
 }

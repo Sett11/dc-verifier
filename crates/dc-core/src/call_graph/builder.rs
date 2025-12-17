@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::call_graph::decorator::Decorator;
+use crate::call_graph::extractor::PydanticSchemaExtractor;
 use crate::call_graph::{CallEdge, CallGraph, CallNode, HttpMethod, Parameter};
 use crate::models::{BaseType, Location, NodeId, SchemaReference, SchemaType, TypeInfo};
 use crate::parsers::{Call, Import, LocationConverter, PythonParser};
@@ -26,6 +27,8 @@ pub struct CallGraphBuilder {
     function_nodes: HashMap<String, NodeId>,
     /// Cache of Pydantic models (class name -> SchemaReference)
     pydantic_models: HashMap<String, SchemaReference>,
+    /// Optional Pydantic schema extractor for JSON schema extraction
+    schema_extractor: Option<Box<dyn PydanticSchemaExtractor>>,
     /// Project root
     project_root: Option<PathBuf>,
     /// Maximum recursion depth (None = unlimited)
@@ -58,11 +61,18 @@ impl CallGraphBuilder {
             module_nodes: HashMap::new(),
             function_nodes: HashMap::new(),
             pydantic_models: HashMap::new(),
+            schema_extractor: None,
             project_root: None,
             max_depth: None,
             current_depth: 0,
             verbose: false,
         }
+    }
+
+    /// Sets the schema extractor for JSON schema extraction
+    pub fn with_schema_extractor(mut self, extractor: Box<dyn PydanticSchemaExtractor>) -> Self {
+        self.schema_extractor = Some(extractor);
+        self
     }
 
     /// Sets the verbose flag for debug output
@@ -187,6 +197,16 @@ impl CallGraphBuilder {
             );
         }
         let _ = self.build_from_entry(&import_path);
+
+        // Extract and cache Pydantic models from imported file
+        if let Err(err) = self.extract_and_cache_pydantic_models(&import_path) {
+            if self.verbose {
+                eprintln!(
+                    "[DEBUG] Failed to extract Pydantic models from {:?}: {}",
+                    import_path, err
+                );
+            }
+        }
 
         // If import has specific names (e.g., "from api.routers import auth"),
         // also try to resolve and process those submodules
@@ -672,8 +692,21 @@ impl CallGraphBuilder {
                     );
 
                     if let Some(model) = models.iter().find(|m| m.name == class_name) {
-                        self.pydantic_models
-                            .insert(class_name.clone(), model.clone());
+                        let mut model = model.clone();
+
+                        // Enrich with JSON schema if extractor is available
+                        if let Some(ref extractor) = self.schema_extractor {
+                            if let Err(err) = extractor.enrich_schema(&mut model) {
+                                if self.verbose {
+                                    eprintln!(
+                                        "[DEBUG] Failed to enrich schema for {}: {}",
+                                        class_name, err
+                                    );
+                                }
+                            }
+                        }
+
+                        self.pydantic_models.insert(class_name.clone(), model);
                     } else {
                         // Fallback: create basic schema reference
                         let schema_ref = SchemaReference {
@@ -702,6 +735,38 @@ impl CallGraphBuilder {
         self.function_nodes.insert(key, node_id);
 
         Ok(node_id)
+    }
+
+    /// Extracts and caches all Pydantic models from a file
+    /// This should be called before resolving type annotations to ensure models are available
+    fn extract_and_cache_pydantic_models(&mut self, file_path: &Path) -> Result<()> {
+        // 1. Check if file was already processed
+        let normalized = Self::normalize_path(file_path);
+        if self.processed_files.contains(&normalized) {
+            return Ok(());
+        }
+
+        // 2. Check if file exists and is a Python file
+        if !file_path.exists() || file_path.extension() != Some(std::ffi::OsStr::new("py")) {
+            return Ok(());
+        }
+
+        // 3. Read and parse file
+        let source = fs::read_to_string(file_path)?;
+        let ast = parse(&source, Mode::Module, file_path.to_string_lossy().as_ref())?;
+        let converter = LocationConverter::new(source);
+
+        // 4. Extract all Pydantic models
+        let models =
+            self.parser
+                .extract_pydantic_models(&ast, &file_path.to_string_lossy(), &converter);
+
+        // 5. Add all models to cache
+        for model in models {
+            self.pydantic_models.insert(model.name.clone(), model);
+        }
+
+        Ok(())
     }
 
     fn process_calls(
@@ -936,8 +1001,30 @@ impl CallGraphBuilder {
             base_type_name
         };
 
+        // Detect dict[str, Any] or any
+        let is_missing_schema = (actual_type_name == "dict" || actual_type_name == "Dict")
+            && type_str.contains("Any")
+            || actual_type_name == "any"
+            || actual_type_name == "Any";
+
         // Check if this type is a Pydantic model in our cache
-        let schema_ref = if let Some(schema) = self.pydantic_models.get(actual_type_name) {
+        let schema_ref = if is_missing_schema {
+            // Create SchemaReference with missing_schema flag
+            let mut metadata = HashMap::new();
+            metadata.insert("missing_schema".to_string(), "true".to_string());
+            metadata.insert("base_type".to_string(), format!("{:?}", BaseType::Object));
+
+            Some(SchemaReference {
+                name: "Object".to_string(),
+                schema_type: SchemaType::JsonSchema,
+                location: Location {
+                    file: _file_path.to_string_lossy().to_string(),
+                    line: _line,
+                    column: None,
+                },
+                metadata,
+            })
+        } else if let Some(schema) = self.pydantic_models.get(actual_type_name) {
             Some(schema.clone())
         } else {
             // Also check if it's a qualified name (e.g., "models.User")
@@ -1392,6 +1479,7 @@ impl CallGraphBuilder {
     }
 
     /// Extracts decorator name from AST expression
+    #[allow(clippy::only_used_in_recursion)]
     fn get_decorator_name(&self, decorator: &ast::Expr) -> Option<String> {
         match decorator {
             ast::Expr::Name(name) => Some(name.id.to_string()),

@@ -307,8 +307,12 @@ impl MarkdownReporter {
             schema.location.file, schema.location.line
         ));
 
-        // Add status if metadata is empty
-        if schema.metadata.is_empty() {
+        // Check for missing schema
+        if schema.metadata.contains_key("missing_schema") {
+            info.push_str(
+                "- **Status**: ⚠️ **WARNING** - Schema validation missing (dict[str, Any] or any)\n",
+            );
+        } else if schema.metadata.is_empty() {
             info.push_str("- **Status**: Schema definition not found\n");
         } else {
             // Add JSON schema preview if available
@@ -331,7 +335,7 @@ impl MarkdownReporter {
             // Add other metadata
             let mut other_metadata = Vec::new();
             for (key, value) in &schema.metadata {
-                if key != "json_schema" && key != "fields" {
+                if key != "json_schema" && key != "fields" && key != "missing_schema" {
                     other_metadata.push((key, value));
                 }
             }
@@ -343,6 +347,15 @@ impl MarkdownReporter {
                 }
             }
         }
+
+        // For Object schemas show base_type from metadata
+        if schema.name == "Object" || schema.schema_type == dc_core::models::SchemaType::JsonSchema
+        {
+            if let Some(base_type) = schema.metadata.get("base_type") {
+                info.push_str(&format!("- **Base Type**: `{}`\n", base_type));
+            }
+        }
+
         info
     }
 
@@ -430,6 +443,15 @@ impl MarkdownReporter {
                         MismatchType::UnnormalizedData => {
                             format!(
                                 "Normalize data format for field `{}` in chain '{}' at {}:{}",
+                                mismatch.path,
+                                chain.name,
+                                mismatch.location.file,
+                                mismatch.location.line
+                            )
+                        }
+                        MismatchType::MissingSchema => {
+                            format!(
+                                "Add schema validation for `{}` in chain '{}' at {}:{} (currently using dict[str, Any] or any)",
                                 mismatch.path,
                                 chain.name,
                                 mismatch.location.file,
