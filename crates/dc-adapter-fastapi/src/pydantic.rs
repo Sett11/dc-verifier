@@ -290,9 +290,18 @@ impl PydanticSchemaExtractor for PydanticExtractor {
             }
 
             // Extract JSON schema
+            // Pydantic's model_json_schema() handles:
+            // - Inheritance (via __mro__ check above)
+            // - Generic types (Pydantic v2 supports generics)
+            // - Nested models (included in schema via $defs/definitions)
             if let Some(schema_str) = Self::serialize_schema(py, &model_class) {
                 Ok(Some(schema_str))
             } else {
+                // If schema extraction failed, it might be:
+                // 1. A generic model that needs type parameters
+                // 2. A model with circular references
+                // 3. A model that's not fully initialized
+                // For now, return None - the model will still be cached without JSON schema
                 Ok(None)
             }
         })

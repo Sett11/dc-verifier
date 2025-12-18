@@ -12,6 +12,20 @@ pub enum ChainDirection {
     BackendToFrontend,
 }
 
+/// Type of data chain
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChainType {
+    /// Full chain: Frontend → Backend → Database (or reverse)
+    /// Contains all layers of the application
+    Full,
+    /// Internal frontend call: Frontend → Frontend
+    /// Only frontend components, no backend interaction
+    FrontendInternal,
+    /// Internal backend call: Backend → Backend
+    /// Only backend components, no database interaction
+    BackendInternal,
+}
+
 /// Main data chain model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataChain {
@@ -25,6 +39,8 @@ pub struct DataChain {
     pub contracts: Vec<Contract>,
     /// Data flow direction
     pub direction: ChainDirection,
+    /// Type of chain (full or internal)
+    pub chain_type: ChainType,
 }
 
 /// Chain link - one node in call graph

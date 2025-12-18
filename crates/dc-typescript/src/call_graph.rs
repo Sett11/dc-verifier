@@ -421,14 +421,17 @@ impl TypeScriptCallGraphBuilder {
 
     /// Extracts types from TanStack Query hooks (useQuery, useMutation)
     ///
-    /// For useQuery<ResponseType, ErrorType>:
-    /// - First parameter = ResponseType (response type)
-    /// - Second parameter = ErrorType (optional, ignored for now)
+    /// For useQuery<TQueryFnData, TError, TData, TQueryKey>:
+    /// - TQueryFnData (1st) = response type
+    /// - TError (2nd) = error type (ignored)
+    /// - TData (3rd) = transformed data type (usually same as TQueryFnData, ignored)
+    /// - TQueryKey (4th) = query key type (ignored)
     ///
-    /// For useMutation<ResponseType, ErrorType, VariablesType>:
-    /// - First parameter = ResponseType (response type)
-    /// - Second parameter = ErrorType (optional, ignored for now)
-    /// - Third parameter = VariablesType (request type)
+    /// For useMutation<TData, TError, TVariables, TContext>:
+    /// - TData (1st) = response type
+    /// - TError (2nd) = error type (ignored)
+    /// - TVariables (3rd) = request type (variables)
+    /// - TContext (4th) = context type (ignored)
     fn extract_types_from_query_hook(
         &self,
         call: &Call,
@@ -436,6 +439,8 @@ impl TypeScriptCallGraphBuilder {
         Option<dc_core::models::TypeInfo>,
         Option<dc_core::models::TypeInfo>,
     ) {
+        let is_mutation = call.name == "useMutation";
+        
         match call.generic_params.len() {
             0 => (None, None),
             1 => {
@@ -444,21 +449,49 @@ impl TypeScriptCallGraphBuilder {
                 (None, response)
             }
             2 => {
-                // useQuery case: ResponseType, ErrorType
+                // useQuery<TQueryFnData, TError> or useMutation<TData, TError>
                 let response = call.generic_params.first().cloned();
-                // Error type is ignored for now
+                // Error type (2nd) is ignored
                 (None, response)
             }
             3 => {
-                // useMutation case: ResponseType, ErrorType, VariablesType
+                // useQuery<TQueryFnData, TError, TData> or useMutation<TData, TError, TVariables>
                 let response = call.generic_params.first().cloned();
-                let request = call.generic_params.get(2).cloned(); // VariablesType is the third param
-                (request, response)
+                if is_mutation {
+                    // For useMutation, 3rd param is TVariables (request type)
+                    let request = call.generic_params.get(2).cloned();
+                    (request, response)
+                } else {
+                    // For useQuery, 3rd param is TData (transformed data, usually same as TQueryFnData)
+                    // We use TQueryFnData (1st) as response, ignore TData
+                    (None, response)
+                }
+            }
+            4 => {
+                // Full signature: useQuery<TQueryFnData, TError, TData, TQueryKey>
+                //              or useMutation<TData, TError, TVariables, TContext>
+                let response = call.generic_params.first().cloned();
+                if is_mutation {
+                    // For useMutation, 3rd param is TVariables (request type)
+                    let request = call.generic_params.get(2).cloned();
+                    (request, response)
+                } else {
+                    // For useQuery, 1st param is TQueryFnData (response type)
+                    // GET requests typically don't have request body, so request is None
+                    (None, response)
+                }
             }
             _ => {
-                // Conservative behavior: don't guess for 4+ generic parameters
-                // This avoids incorrect type inference for complex generic signatures
-                (None, None)
+                // For 5+ parameters, use the same logic as 4 parameters
+                // This handles extended signatures or custom hooks
+                let response = call.generic_params.first().cloned();
+                if is_mutation {
+                    // For useMutation, 3rd param is typically TVariables
+                    let request = call.generic_params.get(2).cloned();
+                    (request, response)
+                } else {
+                    (None, response)
+                }
             }
         }
     }
@@ -518,6 +551,11 @@ impl TypeScriptCallGraphBuilder {
     }
 
     /// Extracts request and response types from a service function
+    /// 
+    /// Tries multiple strategies:
+    /// 1. Find function by exact name
+    /// 2. If not found, extract all functions and find the first one with types
+    /// 3. If still not found, return None
     fn extract_service_types(
         &self,
         service_file: &Path,
@@ -530,27 +568,44 @@ impl TypeScriptCallGraphBuilder {
         let (module, _source, converter) = self.parser.parse_file(service_file)?;
         let file_path_str = service_file.to_string_lossy().to_string();
 
-        // 2. Find the function in the module
+        // 2. First try to find the function by exact name
         let function_info =
             self.parser
                 .find_function_by_name(&module, function_name, &file_path_str, &converter);
 
-        match function_info {
-            Some(info) => {
-                // 3. Extract types
-                // Request type = first parameter of the function
-                let request_type = info.parameters.first().map(|param| param.type_info.clone());
+        if let Some(info) = function_info {
+            // 3. Extract types from found function
+            // Request type = first parameter of the function
+            let request_type = info.parameters.first().map(|param| param.type_info.clone());
 
-                // Response type = return type (already handles Promise<T>)
-                let response_type = info.return_type;
+            // Response type = return type (already handles Promise<T>)
+            let response_type = info.return_type;
 
-                Ok((request_type, response_type))
-            }
-            None => {
-                // Function not found
-                Ok((None, None))
+            return Ok((request_type, response_type));
+        }
+
+        // 4. If function not found by name, try to find any function with types
+        // This handles cases where function name doesn't match exactly
+        let all_functions = self.parser.extract_functions_and_classes(&module, &file_path_str, &converter);
+        
+        // Find first function with both request and response types, or at least response type
+        for func_or_class in all_functions {
+            if let dc_core::parsers::FunctionOrClass::Function { parameters, return_type, .. } = func_or_class {
+                // Prefer functions with both types, but accept any with at least response type
+                if return_type.is_some() || !parameters.is_empty() {
+                    let request_type = parameters.first().map(|param| param.type_info.clone());
+                    let response_type = return_type;
+                    
+                    // If we found a function with types, use it
+                    if request_type.is_some() || response_type.is_some() {
+                        return Ok((request_type, response_type));
+                    }
+                }
             }
         }
+
+        // 5. No suitable function found
+        Ok((None, None))
     }
 
     /// Extracts HTTP method from fetch options object

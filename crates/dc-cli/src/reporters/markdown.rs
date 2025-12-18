@@ -1,5 +1,5 @@
 use anyhow::Result;
-use dc_core::models::{DataChain, LinkType, MismatchType, SchemaType, Severity};
+use dc_core::models::{ChainType, DataChain, LinkType, MismatchType, SchemaType, Severity};
 use std::fs;
 use std::path::Path;
 
@@ -56,8 +56,16 @@ impl MarkdownReporter {
             })
             .count();
 
+        // Count chain types
+        let full_chains = chains.iter().filter(|c| c.chain_type == ChainType::Full).count();
+        let frontend_internal = chains.iter().filter(|c| c.chain_type == ChainType::FrontendInternal).count();
+        let backend_internal = chains.iter().filter(|c| c.chain_type == ChainType::BackendInternal).count();
+
         report.push_str("## Verification Statistics\n\n");
         report.push_str(&format!("- **Total Chains**: {}\n", total_chains));
+        report.push_str(&format!("  - Full Chains: {}\n", full_chains));
+        report.push_str(&format!("  - Internal Frontend: {}\n", frontend_internal));
+        report.push_str(&format!("  - Internal Backend: {}\n", backend_internal));
         report.push_str(&format!("- **API Endpoints**: {}\n", route_count));
         report.push_str(&format!(
             "- **Critical Issues**: {}\n",
@@ -112,6 +120,14 @@ impl MarkdownReporter {
                     dc_core::models::ChainDirection::BackendToFrontend => {
                         "Database → Backend → Frontend"
                     }
+                }
+            ));
+            report.push_str(&format!(
+                "#### Type: {}\n\n",
+                match chain.chain_type {
+                    ChainType::Full => "Full Chain (Frontend → Backend → Database)",
+                    ChainType::FrontendInternal => "Internal Frontend Call (Frontend → Frontend)",
+                    ChainType::BackendInternal => "Internal Backend Call (Backend → Backend)",
                 }
             ));
 
@@ -309,9 +325,53 @@ impl MarkdownReporter {
 
         // Check for missing schema
         if schema.metadata.contains_key("missing_schema") {
-            info.push_str(
-                "- **Status**: ⚠️ **WARNING** - Schema validation missing (dict[str, Any] or any)\n",
-            );
+            let reason = schema.metadata.get("reason")
+                .map(|r| r.as_str())
+                .unwrap_or("Schema validation missing");
+            
+            info.push_str(&format!(
+                "- **Status**: ⚠️ **WARNING** - {}\n",
+                reason
+            ));
+            
+            // Add recommendation for creating Pydantic schema
+            if schema.name == "Object" {
+                info.push_str(
+                    "- **Recommendation**: Create a Pydantic model to replace `dict[str, Any]` or `any` type.\n",
+                );
+                info.push_str(
+                    "  Example:\n",
+                );
+                info.push_str(
+                    "  ```python\n",
+                );
+                info.push_str(&format!(
+                    "  from pydantic import BaseModel\n",
+                ));
+                info.push_str(&format!(
+                    "  \n",
+                ));
+                info.push_str(&format!(
+                    "  class {}Model(BaseModel):\n",
+                    schema.location.file
+                        .rsplit('/')
+                        .next()
+                        .or_else(|| schema.location.file.rsplit('\\').next())
+                        .unwrap_or("Your")
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or("Your")
+                ));
+                info.push_str(
+                    "      # Add fields here\n",
+                );
+                info.push_str(
+                    "      pass\n",
+                );
+                info.push_str(
+                    "  ```\n",
+                );
+            }
         } else if schema.metadata.is_empty() {
             info.push_str("- **Status**: Schema definition not found\n");
         } else {
@@ -348,11 +408,24 @@ impl MarkdownReporter {
             }
         }
 
-        // For Object schemas show base_type from metadata
+        // For Object schemas show base_type from metadata and additional details
         if schema.name == "Object" || schema.schema_type == dc_core::models::SchemaType::JsonSchema
         {
             if let Some(base_type) = schema.metadata.get("base_type") {
                 info.push_str(&format!("- **Base Type**: `{}`\n", base_type));
+            }
+            
+            // Show additional context for Object schemas
+            if schema.name == "Object" && !schema.metadata.contains_key("json_schema") {
+                info.push_str(
+                    "- **Note**: This is a generic Object type without detailed schema definition.\n",
+                );
+                if schema.location.line > 0 {
+                    info.push_str(&format!(
+                        "  Consider defining a Pydantic model at `{}:{}` to provide type safety.\n",
+                        schema.location.file, schema.location.line
+                    ));
+                }
             }
         }
 

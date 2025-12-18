@@ -380,6 +380,72 @@ impl CallGraphBuilder {
             location.file = current_file.to_string_lossy().to_string();
         }
 
+        // Check for response_model in decorator keyword arguments
+        let response_model_type = decorator
+            .keyword_arguments
+            .get("response_model")
+            .map(|s| s.trim().to_string());
+        
+        // Check if handler function has a return type
+        let handler_returns_data = self.graph.node_weight(handler_node.0).and_then(|node| {
+            match node {
+                CallNode::Function { return_type, .. } => return_type.as_ref(),
+                CallNode::Method { return_type, .. } => return_type.as_ref(),
+                _ => None,
+            }
+        });
+        
+        // Check response_model and return type correspondence
+        if let Some(return_type_info) = handler_returns_data {
+            if let Some(ref response_model_str) = response_model_type {
+                // Extract type name from response_model (e.g., "User" or "db.schemas.User")
+                let response_model_name = response_model_str
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(response_model_str)
+                    .trim()
+                    .to_string();
+                
+                // Compare with return type name
+                if let Some(schema_ref) = &return_type_info.schema_ref {
+                    let return_type_name = schema_ref.name.trim();
+                    
+                    // Check if names match (case-insensitive, ignoring qualified names)
+                    let return_type_simple = return_type_name
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or(return_type_name);
+                    
+                    if !return_type_simple.eq_ignore_ascii_case(&response_model_name) {
+                        // Type mismatch: response_model doesn't match return type
+                        // This will be checked by contract rules later
+                        // For now, we can add metadata to indicate potential mismatch
+                    }
+                } else if return_type_info.base_type == crate::models::BaseType::Object {
+                    // Return type is Object but response_model is specified
+                    // This suggests the return type annotation might be missing or incorrect
+                }
+            } else {
+                // No response_model specified
+                // Check if return type is a missing schema (dict[...] or any)
+                if let Some(schema_ref) = &return_type_info.schema_ref {
+                    if schema_ref.metadata.contains_key("missing_schema") {
+                        // Already marked as missing schema, nothing to do
+                    } else {
+                        // Return type exists but no response_model - mark as missing
+                        // This is handled by MissingSchemaRule
+                    }
+                } else {
+                    // Return type exists but no schema reference - might be missing schema
+                    // Check if it's a dict or any type
+                    if return_type_info.base_type == crate::models::BaseType::Object {
+                        // Mark as missing schema
+                        // This is handled by MissingSchemaRule
+                    }
+                }
+            }
+        }
+
         let route_node = NodeId::from(self.graph.add_node(CallNode::Route {
             path: route_path.clone(),
             method: http_method,
@@ -546,13 +612,18 @@ impl CallGraphBuilder {
         let (line, _column) = converter.byte_offset_to_location(range.start().into());
 
         let parameters = self.convert_parameters(&func_def.args, file_path, line);
+        
+        // Extract return type annotation if present
+        let return_type = func_def.returns.as_ref().map(|ret_ann| {
+            self.resolve_type_annotation(ret_ann, file_path, line)
+        });
 
         let node_id = NodeId::from(self.graph.add_node(CallNode::Function {
             name: func_def.name.to_string(),
             file: file_path.to_path_buf(),
             line,
             parameters,
-            return_type: None,
+            return_type,
         }));
 
         let key = Self::function_key(file_path, &func_def.name);
@@ -572,13 +643,18 @@ impl CallGraphBuilder {
         let (line, _column) = converter.byte_offset_to_location(range.start().into());
 
         let parameters = self.convert_parameters(&func_def.args, file_path, line);
+        
+        // Extract return type annotation if present
+        let return_type = func_def.returns.as_ref().map(|ret_ann| {
+            self.resolve_type_annotation(ret_ann, file_path, line)
+        });
 
         let node_id = NodeId::from(self.graph.add_node(CallNode::Function {
             name: func_def.name.to_string(),
             file: file_path.to_path_buf(),
             line,
             parameters,
-            return_type: None,
+            return_type,
         }));
 
         let key = Self::function_key(file_path, &func_def.name);
@@ -1012,11 +1088,23 @@ impl CallGraphBuilder {
             base_type_name
         };
 
-        // Detect dict[str, Any] or any
-        let is_missing_schema = (actual_type_name == "dict" || actual_type_name == "Dict")
-            && type_str.contains("Any")
-            || actual_type_name == "any"
-            || actual_type_name == "Any";
+        // Detect dict[str, Any], dict[str, int], dict[str, str], dict[str, list[int]], etc.
+        // Any dict type without a proper Pydantic schema should be flagged
+        let is_missing_schema = if actual_type_name == "dict" || actual_type_name == "Dict" {
+            // Check if it's a generic dict type (dict[...])
+            // If it contains brackets, it's a generic dict and should be flagged
+            // unless it's a specific typed dict like TypedDict
+            if type_str.contains('[') {
+                // Check if it's TypedDict (which is acceptable)
+                !type_str.contains("TypedDict")
+            } else {
+                // Plain dict without type parameters is also missing schema
+                true
+            }
+        } else {
+            // Check for 'any' or 'Any' types
+            actual_type_name == "any" || actual_type_name == "Any"
+        };
 
         // Check if this type is a Pydantic model in our cache
         let schema_ref = if is_missing_schema {
@@ -1038,13 +1126,32 @@ impl CallGraphBuilder {
         } else if let Some(schema) = self.pydantic_models.get(actual_type_name) {
             Some(schema.clone())
         } else {
-            // Also check if it's a qualified name (e.g., "models.User")
-            // Extract the last component
-            if let Some(last_dot) = actual_type_name.rfind('.') {
-                let simple_name = &actual_type_name[last_dot + 1..];
-                self.pydantic_models.get(simple_name).cloned()
+            // Try to resolve the type through various strategies:
+            // 1. Check if it's a qualified name (e.g., "models.User", "db.schemas.RegisterRequest")
+            //    Extract the last component and search for it
+            // 2. Check all models in cache for partial matches
+            // 3. Try to resolve through imports (if we had access to them)
+            
+            let simple_name = if let Some(last_dot) = actual_type_name.rfind('.') {
+                &actual_type_name[last_dot + 1..]
             } else {
-                None
+                actual_type_name
+            };
+            
+            // First try simple name
+            if let Some(schema) = self.pydantic_models.get(simple_name) {
+                Some(schema.clone())
+            } else {
+                // Try to find by exact match in cache (case-insensitive)
+                // This handles cases where the type might be imported from another module
+                // but we only have the simple name in cache
+                self.pydantic_models
+                    .iter()
+                    .find(|(name, _)| {
+                        // Check if names match (case-insensitive)
+                        name.eq_ignore_ascii_case(simple_name)
+                    })
+                    .map(|(_, schema)| schema.clone())
             }
         };
 

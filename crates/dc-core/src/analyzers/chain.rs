@@ -1,7 +1,7 @@
 use crate::call_graph::{CallGraph, CallNode, Parameter};
 use crate::data_flow::DataFlowTracker;
 use crate::models::{
-    BaseType, ChainDirection, Contract, DataChain, Link, LinkType, Location, NodeId,
+    BaseType, ChainDirection, ChainType, Contract, DataChain, Link, LinkType, Location, NodeId,
     SchemaReference, SchemaType, Severity, TypeInfo,
 };
 use anyhow::{anyhow, bail, Result};
@@ -144,6 +144,7 @@ impl<'a> ChainBuilder<'a> {
 
         let links = self.create_links_from_nodes(&path, ChainDirection::FrontendToBackend)?;
         let contracts = self.build_contracts(&links);
+        let chain_type = self.determine_chain_type(&links);
 
         Ok(DataChain {
             id: format!("chain-{}", start.index()),
@@ -151,6 +152,7 @@ impl<'a> ChainBuilder<'a> {
             links,
             contracts,
             direction: ChainDirection::FrontendToBackend,
+            chain_type,
         })
     }
 
@@ -167,6 +169,7 @@ impl<'a> ChainBuilder<'a> {
 
         let links = self.create_links_from_nodes(&path, ChainDirection::BackendToFrontend)?;
         let contracts = self.build_contracts(&links);
+        let chain_type = self.determine_chain_type(&links);
 
         Ok(DataChain {
             id: format!("chain-reverse-{}", start.index()),
@@ -174,6 +177,7 @@ impl<'a> ChainBuilder<'a> {
             links,
             contracts,
             direction: ChainDirection::BackendToFrontend,
+            chain_type,
         })
     }
 
@@ -448,6 +452,55 @@ impl<'a> ChainBuilder<'a> {
                 _ => LinkType::Transformer,
             })
             .unwrap_or(LinkType::Transformer)
+    }
+
+    /// Determines the type of chain based on its links
+    /// 
+    /// - Full: Contains Route nodes (API endpoints) - spans multiple layers
+    /// - FrontendInternal: All nodes are from TypeScript files (.ts/.tsx)
+    /// - BackendInternal: All nodes are from Python files (.py)
+    fn determine_chain_type(&self, links: &[Link]) -> ChainType {
+        if links.is_empty() {
+            return ChainType::Full;
+        }
+
+        // Check if chain contains Route nodes (API endpoints)
+        let has_route = links.iter().any(|link| {
+            self.graph
+                .node_weight(*link.node_id)
+                .map(|node| matches!(node, CallNode::Route { .. }))
+                .unwrap_or(false)
+        });
+
+        if has_route {
+            return ChainType::Full;
+        }
+
+        // Check file extensions to determine if all nodes are from same layer
+        let mut has_frontend = false;
+        let mut has_backend = false;
+
+        for link in links {
+            let file_ext = Path::new(&link.location.file)
+                .extension()
+                .and_then(|e| e.to_str());
+            
+            match file_ext {
+                Some("ts") | Some("tsx") => has_frontend = true,
+                Some("py") => has_backend = true,
+                _ => {}
+            }
+        }
+
+        // Determine chain type
+        if has_frontend && !has_backend {
+            ChainType::FrontendInternal
+        } else if has_backend && !has_frontend {
+            ChainType::BackendInternal
+        } else {
+            // Mixed or unknown - treat as full chain
+            ChainType::Full
+        }
     }
 
     fn location_from_path(&self, path: &Path, line: usize) -> Location {

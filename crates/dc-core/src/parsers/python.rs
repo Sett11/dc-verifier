@@ -589,13 +589,14 @@ impl PythonParser {
         for decorator in decorator_list {
             if let Some(name) = self.get_decorator_name(decorator) {
                 if self.is_route_decorator(&name) {
-                    let args = self.extract_decorator_arguments(decorator);
+                    let (args, kwargs) = self.extract_decorator_arguments(decorator);
                     // Extract real location from decorator AST
                     let range = decorator.range();
                     let (line, column) = converter.byte_offset_to_location(range.start().into());
                     decorators.push(crate::call_graph::Decorator {
                         name,
                         arguments: args,
+                        keyword_arguments: kwargs,
                         location: Location {
                             file: file_path.to_string(),
                             line,
@@ -620,18 +621,26 @@ impl PythonParser {
         }
     }
 
-    fn extract_decorator_arguments(&self, decorator: &ast::Expr) -> Vec<String> {
+    fn extract_decorator_arguments(&self, decorator: &ast::Expr) -> (Vec<String>, std::collections::HashMap<String, String>) {
         if let ast::Expr::Call(call_expr) = decorator {
             let mut args = Vec::new();
+            let mut kwargs = std::collections::HashMap::new();
+            
+            // Extract positional arguments
             for arg in &call_expr.args {
                 args.push(self.expr_to_string(arg));
             }
+            
+            // Extract keyword arguments
             for kw in &call_expr.keywords {
-                args.push(self.expr_to_string(&kw.value));
+                if let Some(arg_name) = &kw.arg {
+                    kwargs.insert(arg_name.to_string(), self.expr_to_string(&kw.value));
+                }
             }
-            args
+            
+            (args, kwargs)
         } else {
-            Vec::new()
+            (Vec::new(), std::collections::HashMap::new())
         }
     }
 
