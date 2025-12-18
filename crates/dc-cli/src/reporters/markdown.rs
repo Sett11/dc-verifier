@@ -183,9 +183,16 @@ impl MarkdownReporter {
                     ));
                     report.push_str("**Mismatches:**\n\n");
                     for mismatch in &contract.mismatches {
+                        let severity_level = mismatch.severity_level;
+                        let severity_emoji = match severity_level {
+                            dc_core::models::SeverityLevel::Critical => "🔴",
+                            dc_core::models::SeverityLevel::High => "🟠",
+                            dc_core::models::SeverityLevel::Medium => "🟡",
+                            dc_core::models::SeverityLevel::Low => "🔵",
+                        };
                         report.push_str(&format!(
-                            "- **{:?}** at path `{}`\n",
-                            mismatch.mismatch_type, mismatch.path
+                            "- {} **{:?}** (Severity: {:?}) at path `{}`\n",
+                            severity_emoji, mismatch.mismatch_type, severity_level, mismatch.path
                         ));
                         report.push_str(&format!("  - Message: {}\n", mismatch.message));
                         report.push_str(&format!(
@@ -226,27 +233,51 @@ impl MarkdownReporter {
                 "✅ **No issues detected. All data chains are correctly configured.**\n\n",
             );
         } else {
-            // Group by severity
-            let critical_recs: Vec<_> = recommendations
-                .iter()
-                .filter(|r| r.0 == Severity::Critical)
-                .collect();
-            let warning_recs: Vec<_> = recommendations
-                .iter()
-                .filter(|r| r.0 == Severity::Warning)
-                .collect();
-
-            if !critical_recs.is_empty() {
-                report.push_str("### 🔴 Critical Issues\n\n");
-                for (_, rec) in critical_recs {
+            // Group by issue type and severity
+            let mut missing_schema_recs: Vec<_> = Vec::new();
+            let mut type_mismatch_recs: Vec<_> = Vec::new();
+            let mut missing_field_recs: Vec<_> = Vec::new();
+            let mut other_recs: Vec<_> = Vec::new();
+            
+            for (severity, rec) in &recommendations {
+                if rec.contains("schema validation") || rec.contains("Missing schema") {
+                    missing_schema_recs.push((severity, rec));
+                } else if rec.contains("type mismatch") {
+                    type_mismatch_recs.push((severity, rec));
+                } else if rec.contains("missing required field") {
+                    missing_field_recs.push((severity, rec));
+                } else {
+                    other_recs.push((severity, rec));
+                }
+            }
+            
+            if !missing_schema_recs.is_empty() {
+                report.push_str("### 🔴 Endpoints without response_model or request schemas\n\n");
+                for (_, rec) in missing_schema_recs {
                     report.push_str(&format!("- {}\n", rec));
                 }
                 report.push('\n');
             }
-
-            if !warning_recs.is_empty() {
-                report.push_str("### 🟡 Warnings\n\n");
-                for (_, rec) in warning_recs {
+            
+            if !type_mismatch_recs.is_empty() {
+                report.push_str("### 🟡 Type mismatches\n\n");
+                for (_, rec) in type_mismatch_recs {
+                    report.push_str(&format!("- {}\n", rec));
+                }
+                report.push('\n');
+            }
+            
+            if !missing_field_recs.is_empty() {
+                report.push_str("### 🟡 Missing required fields\n\n");
+                for (_, rec) in missing_field_recs {
+                    report.push_str(&format!("- {}\n", rec));
+                }
+                report.push('\n');
+            }
+            
+            if !other_recs.is_empty() {
+                report.push_str("### ⚠️ Other issues\n\n");
+                for (_, rec) in other_recs {
                     report.push_str(&format!("- {}\n", rec));
                 }
                 report.push('\n');
@@ -519,12 +550,52 @@ impl MarkdownReporter {
                             )
                         }
                         MismatchType::MissingSchema => {
+                            let severity_level = mismatch.severity_level;
+                            let severity_desc = match severity_level {
+                                dc_core::models::SeverityLevel::Critical => "CRITICAL",
+                                dc_core::models::SeverityLevel::High => "HIGH",
+                                dc_core::models::SeverityLevel::Medium => "MEDIUM",
+                                dc_core::models::SeverityLevel::Low => "LOW",
+                            };
+                            
+                            // Determine if it's a request or response issue
+                            let issue_type = if severity_level == dc_core::models::SeverityLevel::Critical {
+                                "request parameter"
+                            } else {
+                                "response"
+                            };
+                            
+                            // Extract file name from location
+                            let file_name = std::path::Path::new(&mismatch.location.file)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or(&mismatch.location.file);
+                            
                             format!(
-                                "Add schema validation for `{}` in chain '{}' at {}:{} (currently using dict[str, Any] or any)",
-                                mismatch.path,
+                                "[{}] Add Pydantic schema validation for {} in chain '{}' at {}:{}.\n  \
+                                **File:** `{}`\n  \
+                                **Issue:** Missing schema for {}\n  \
+                                **Recommendation:** Create a Pydantic model and use it in the {} decorator.\n  \
+                                **Example:**\n  \
+                                ```python\n  \
+                                from pydantic import BaseModel\n  \
+                                \n  \
+                                class YourResponseModel(BaseModel):\n  \
+                                    field1: str\n  \
+                                    field2: int\n  \
+                                \n  \
+                                @router.get(\"/endpoint\", response_model=YourResponseModel)\n  \
+                                async def handler() -> YourResponseModel:\n  \
+                                    return YourResponseModel(field1=\"value\", field2=42)\n  \
+                                ```",
+                                severity_desc,
+                                if mismatch.path.is_empty() { "schema" } else { &mismatch.path },
                                 chain.name,
                                 mismatch.location.file,
-                                mismatch.location.line
+                                mismatch.location.line,
+                                file_name,
+                                issue_type,
+                                if severity_level == dc_core::models::SeverityLevel::Critical { "request" } else { "response_model" }
                             )
                         }
                     };

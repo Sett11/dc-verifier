@@ -33,6 +33,9 @@ pub struct Mismatch {
     pub location: Location,
     /// Error message
     pub message: String,
+    /// Detailed severity level for more precise classification
+    #[serde(default)]
+    pub severity_level: SeverityLevel,
 }
 
 /// Mismatch type
@@ -61,4 +64,18 @@ pub enum Severity {
     Warning,
     /// Critical issue (will cause error)
     Critical,
+}
+
+/// Detailed severity level for more precise classification
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+pub enum SeverityLevel {
+    /// Critical: absence of schema in request payload (can lead to validation errors)
+    Critical,
+    /// High: absence of schema in response (type safety issues, but data is correct)
+    High,
+    /// Medium: absence of typing on frontend (development issues, but runtime works)
+    Medium,
+    /// Low: suboptimal structure, but functionally correct
+    #[default]
+    Low,
 }

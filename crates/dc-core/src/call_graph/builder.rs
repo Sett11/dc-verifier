@@ -37,6 +37,9 @@ pub struct CallGraphBuilder {
     current_depth: usize,
     /// Enable verbose debug output
     verbose: bool,
+    /// Import information: file path -> (imported name -> module path)
+    /// Stores which names are imported from which modules in each file
+    file_imports: HashMap<PathBuf, HashMap<String, String>>,
 }
 
 impl CallGraphBuilder {
@@ -66,6 +69,7 @@ impl CallGraphBuilder {
             max_depth: None,
             current_depth: 0,
             verbose: false,
+            file_imports: HashMap::new(),
         }
     }
 
@@ -386,6 +390,29 @@ impl CallGraphBuilder {
             .get("response_model")
             .map(|s| s.trim().to_string());
 
+        // Try to resolve response_model from imports if not found in cache
+        if let Some(ref response_model_str) = response_model_type {
+            let response_model_name = response_model_str
+                .rsplit('.')
+                .next()
+                .unwrap_or(response_model_str)
+                .trim()
+                .to_string();
+
+            // Check if already in cache
+            if !self.pydantic_models.contains_key(&response_model_name) {
+                // Try to resolve from imports
+                if let Err(err) = self.resolve_schema_from_imports(&response_model_name, current_file) {
+                    if self.verbose {
+                        eprintln!(
+                            "[DEBUG] Failed to resolve schema '{}' from imports in {:?}: {}",
+                            response_model_name, current_file, err
+                        );
+                    }
+                }
+            }
+        }
+
         // Check if handler function has a return type
         let handler_returns_data =
             self.graph
@@ -429,21 +456,9 @@ impl CallGraphBuilder {
             } else {
                 // No response_model specified
                 // Check if return type is a missing schema (dict[...] or any)
-                if let Some(schema_ref) = &return_type_info.schema_ref {
-                    if schema_ref.metadata.contains_key("missing_schema") {
-                        // Already marked as missing schema, nothing to do
-                    } else {
-                        // Return type exists but no response_model - mark as missing
-                        // This is handled by MissingSchemaRule
-                    }
-                } else {
-                    // Return type exists but no schema reference - might be missing schema
-                    // Check if it's a dict or any type
-                    if return_type_info.base_type == crate::models::BaseType::Object {
-                        // Mark as missing schema
-                        // This is handled by MissingSchemaRule
-                    }
-                }
+                // This will be checked by MissingSchemaRule which looks for missing_schema flag
+                // The schema_ref already has the missing_schema flag set in resolve_type_annotation
+                // if it's a dict[str, Any] or any type
             }
         }
 
@@ -512,14 +527,38 @@ impl CallGraphBuilder {
         let imports = self
             .parser
             .extract_imports(module_ast, &file_path_str, converter);
-        for import in imports {
-            if let Err(err) = self.process_import(module_node, &import, file_path) {
+        
+        // Store import information for schema resolution
+        let normalized_file = Self::normalize_path(file_path);
+        let mut file_imports_map = HashMap::new();
+        
+        for import in &imports {
+            if let Err(err) = self.process_import(module_node, import, file_path) {
                 eprintln!(
                     "Failed to process import {} in {:?}: {}",
                     import.path, file_path, err
                 );
             }
+            
+            // Store import mapping: imported name -> module path
+            if !import.names.is_empty() {
+                // from module import name1, name2
+                for name in &import.names {
+                    file_imports_map.insert(name.clone(), import.path.clone());
+                }
+            } else {
+                // import module or import module as alias
+                // For simple imports, we store the module path itself
+                // This will be used when we need to resolve names from that module
+                file_imports_map.insert(import.path.clone(), import.path.clone());
+            }
         }
+        
+        // Store the import map after processing all imports
+        if !file_imports_map.is_empty() {
+            self.file_imports.insert(normalized_file, file_imports_map);
+        }
+        
         Ok(())
     }
 
@@ -1104,6 +1143,7 @@ impl CallGraphBuilder {
         };
 
         // Detect dict[str, Any], dict[str, int], dict[str, str], dict[str, list[int]], etc.
+        // Also detect list[dict[str, Any]] patterns
         // Any dict type without a proper Pydantic schema should be flagged
         let is_missing_schema = if actual_type_name == "dict" || actual_type_name == "Dict" {
             // Check if it's a generic dict type (dict[...])
@@ -1115,6 +1155,25 @@ impl CallGraphBuilder {
             } else {
                 // Plain dict without type parameters is also missing schema
                 true
+            }
+        } else if actual_type_name == "list" || actual_type_name == "List" {
+            // Check for list[dict[str, Any]] patterns
+            // Extract the inner type from list[...]
+            if let Some(start) = type_str.find('[') {
+                if let Some(end) = type_str.rfind(']') {
+                    let inner_type = type_str[start + 1..end].trim();
+                    // Check if inner type is dict[...]
+                    if inner_type.starts_with("dict") || inner_type.starts_with("Dict") {
+                        // list[dict[...]] should have response_model
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
             }
         } else {
             // Check for 'any' or 'Any' types
@@ -1545,6 +1604,45 @@ impl CallGraphBuilder {
             path.set_extension("py");
         }
         path
+    }
+
+    /// Resolves a schema name from imports in the current file
+    /// Tries to find the module that imports this schema and extracts it
+    fn resolve_schema_from_imports(
+        &mut self,
+        schema_name: &str,
+        current_file: &Path,
+    ) -> Result<()> {
+        let normalized_file = Self::normalize_path(current_file);
+        
+        // Check if we have import information for this file
+        let Some(imports_map) = self.file_imports.get(&normalized_file) else {
+            return Ok(()); // No imports recorded for this file
+        };
+        
+        // Find the module path for this schema name
+        let Some(module_path_str) = imports_map.get(schema_name) else {
+            return Ok(()); // Schema not found in imports
+        };
+        
+        // Resolve the module path to a file path
+        let module_file = self.resolve_import_path(module_path_str, current_file)?;
+        
+        // Extract and cache Pydantic models from the imported module
+        // This will populate pydantic_models cache with the schema
+        self.extract_and_cache_pydantic_models(&module_file)?;
+        
+        // Check if the schema is now in cache
+        if self.pydantic_models.contains_key(schema_name) {
+            if self.verbose {
+                eprintln!(
+                    "[DEBUG] Successfully resolved schema '{}' from module {:?}",
+                    schema_name, module_file
+                );
+            }
+        }
+        
+        Ok(())
     }
 
     fn normalize_path(path: &Path) -> PathBuf {

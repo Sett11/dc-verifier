@@ -1,5 +1,5 @@
 use crate::analyzers::schema_parser::SchemaParser;
-use crate::models::{BaseType, Contract, Mismatch, MismatchType, TypeInfo};
+use crate::models::{BaseType, Contract, Mismatch, MismatchType, SeverityLevel, TypeInfo};
 
 /// Trait for contract checking rules
 pub trait ContractRule: Send + Sync {
@@ -50,6 +50,7 @@ impl ContractRule for TypeMismatchRule {
                             "Type mismatch for field '{}': expected {:?}, got {:?}",
                             field_name, from_field.base_type, to_field.base_type
                         ),
+                        severity_level: SeverityLevel::High,
                     });
                 }
             }
@@ -103,6 +104,7 @@ impl ContractRule for MissingFieldRule {
                         "Missing required field '{}' in source schema",
                         required_field
                     ),
+                    severity_level: SeverityLevel::High,
                 });
             }
         }
@@ -132,6 +134,7 @@ impl ContractRule for MissingFieldRule {
                     },
                     location: contract.from_schema.location.clone(),
                     message: format!("Missing required field '{}' in source schema", field_name),
+                    severity_level: SeverityLevel::High,
                 });
             }
         }
@@ -195,6 +198,7 @@ impl ContractRule for UnnormalizedDataRule {
                             "Field '{}' may require normalization (email format expected)",
                             field_name
                         ),
+                        severity_level: SeverityLevel::Medium,
                     });
                 }
 
@@ -230,6 +234,7 @@ impl ContractRule for UnnormalizedDataRule {
                             "Field '{}' may require normalization (pattern validation expected)",
                             field_name
                         ),
+                        severity_level: SeverityLevel::Medium,
                     });
                 }
             }
@@ -251,6 +256,7 @@ impl ContractRule for MissingSchemaRule {
         let mut mismatches = Vec::new();
 
         // Check from_schema
+        // If missing schema in source (from_schema), it's likely a request parameter → Critical
         if contract.from_schema.metadata.contains_key("missing_schema") {
             mismatches.push(Mismatch {
                 mismatch_type: MismatchType::MissingSchema,
@@ -272,10 +278,12 @@ impl ContractRule for MissingSchemaRule {
                     "Source schema '{}' is missing validation schema (dict[str, Any] or any)",
                     contract.from_schema.name
                 ),
+                severity_level: SeverityLevel::Critical,
             });
         }
 
         // Check to_schema
+        // If missing schema in target (to_schema), it's likely a response → High
         if contract.to_schema.metadata.contains_key("missing_schema") {
             mismatches.push(Mismatch {
                 mismatch_type: MismatchType::MissingSchema,
@@ -297,6 +305,7 @@ impl ContractRule for MissingSchemaRule {
                     "Target schema '{}' is missing validation schema (dict[str, Any] or any)",
                     contract.to_schema.name
                 ),
+                severity_level: SeverityLevel::High,
             });
         }
 
