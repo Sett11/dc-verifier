@@ -1635,13 +1635,11 @@ impl CallGraphBuilder {
         self.extract_and_cache_pydantic_models(&module_file)?;
 
         // Check if the schema is now in cache
-        if self.pydantic_models.contains_key(schema_name) {
-            if self.verbose {
-                eprintln!(
-                    "[DEBUG] Successfully resolved schema '{}' from module {:?}",
-                    schema_name, module_file
-                );
-            }
+        if self.pydantic_models.contains_key(schema_name) && self.verbose {
+            eprintln!(
+                "[DEBUG] Successfully resolved schema '{}' from module {:?}",
+                schema_name, module_file
+            );
         }
 
         Ok(())
