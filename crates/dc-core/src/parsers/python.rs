@@ -621,23 +621,26 @@ impl PythonParser {
         }
     }
 
-    fn extract_decorator_arguments(&self, decorator: &ast::Expr) -> (Vec<String>, std::collections::HashMap<String, String>) {
+    fn extract_decorator_arguments(
+        &self,
+        decorator: &ast::Expr,
+    ) -> (Vec<String>, std::collections::HashMap<String, String>) {
         if let ast::Expr::Call(call_expr) = decorator {
             let mut args = Vec::new();
             let mut kwargs = std::collections::HashMap::new();
-            
+
             // Extract positional arguments
             for arg in &call_expr.args {
                 args.push(self.expr_to_string(arg));
             }
-            
+
             // Extract keyword arguments
             for kw in &call_expr.keywords {
                 if let Some(arg_name) = &kw.arg {
                     kwargs.insert(arg_name.to_string(), self.expr_to_string(&kw.value));
                 }
             }
-            
+
             (args, kwargs)
         } else {
             (Vec::new(), std::collections::HashMap::new())

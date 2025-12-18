@@ -385,16 +385,17 @@ impl CallGraphBuilder {
             .keyword_arguments
             .get("response_model")
             .map(|s| s.trim().to_string());
-        
+
         // Check if handler function has a return type
-        let handler_returns_data = self.graph.node_weight(handler_node.0).and_then(|node| {
-            match node {
-                CallNode::Function { return_type, .. } => return_type.as_ref(),
-                CallNode::Method { return_type, .. } => return_type.as_ref(),
-                _ => None,
-            }
-        });
-        
+        let handler_returns_data =
+            self.graph
+                .node_weight(handler_node.0)
+                .and_then(|node| match node {
+                    CallNode::Function { return_type, .. } => return_type.as_ref(),
+                    CallNode::Method { return_type, .. } => return_type.as_ref(),
+                    _ => None,
+                });
+
         // Check response_model and return type correspondence
         if let Some(return_type_info) = handler_returns_data {
             if let Some(ref response_model_str) = response_model_type {
@@ -405,17 +406,17 @@ impl CallGraphBuilder {
                     .unwrap_or(response_model_str)
                     .trim()
                     .to_string();
-                
+
                 // Compare with return type name
                 if let Some(schema_ref) = &return_type_info.schema_ref {
                     let return_type_name = schema_ref.name.trim();
-                    
+
                     // Check if names match (case-insensitive, ignoring qualified names)
                     let return_type_simple = return_type_name
                         .rsplit('.')
                         .next()
                         .unwrap_or(return_type_name);
-                    
+
                     if !return_type_simple.eq_ignore_ascii_case(&response_model_name) {
                         // Type mismatch: response_model doesn't match return type
                         // This will be checked by contract rules later
@@ -612,11 +613,12 @@ impl CallGraphBuilder {
         let (line, _column) = converter.byte_offset_to_location(range.start().into());
 
         let parameters = self.convert_parameters(&func_def.args, file_path, line);
-        
+
         // Extract return type annotation if present
-        let return_type = func_def.returns.as_ref().map(|ret_ann| {
-            self.resolve_type_annotation(ret_ann, file_path, line)
-        });
+        let return_type = func_def
+            .returns
+            .as_ref()
+            .map(|ret_ann| self.resolve_type_annotation(ret_ann, file_path, line));
 
         let node_id = NodeId::from(self.graph.add_node(CallNode::Function {
             name: func_def.name.to_string(),
@@ -643,11 +645,12 @@ impl CallGraphBuilder {
         let (line, _column) = converter.byte_offset_to_location(range.start().into());
 
         let parameters = self.convert_parameters(&func_def.args, file_path, line);
-        
+
         // Extract return type annotation if present
-        let return_type = func_def.returns.as_ref().map(|ret_ann| {
-            self.resolve_type_annotation(ret_ann, file_path, line)
-        });
+        let return_type = func_def
+            .returns
+            .as_ref()
+            .map(|ret_ann| self.resolve_type_annotation(ret_ann, file_path, line));
 
         let node_id = NodeId::from(self.graph.add_node(CallNode::Function {
             name: func_def.name.to_string(),
@@ -683,11 +686,17 @@ impl CallGraphBuilder {
             parameters.remove(0);
         }
 
+        // Extract return type annotation if present
+        let return_type = func_def
+            .returns
+            .as_ref()
+            .map(|ret_ann| self.resolve_type_annotation(ret_ann, file_path, line));
+
         let node_id = NodeId::from(self.graph.add_node(CallNode::Method {
             name: func_def.name.to_string(),
             class: class_node,
             parameters,
-            return_type: None,
+            return_type,
         }));
 
         let key = Self::function_key(file_path, &format!("{}.{}", class_name, func_def.name));
@@ -715,11 +724,17 @@ impl CallGraphBuilder {
             parameters.remove(0);
         }
 
+        // Extract return type annotation if present
+        let return_type = func_def
+            .returns
+            .as_ref()
+            .map(|ret_ann| self.resolve_type_annotation(ret_ann, file_path, line));
+
         let node_id = NodeId::from(self.graph.add_node(CallNode::Method {
             name: func_def.name.to_string(),
             class: class_node,
             parameters,
-            return_type: None,
+            return_type,
         }));
 
         let key = Self::function_key(file_path, &format!("{}.{}", class_name, func_def.name));
@@ -1131,13 +1146,13 @@ impl CallGraphBuilder {
             //    Extract the last component and search for it
             // 2. Check all models in cache for partial matches
             // 3. Try to resolve through imports (if we had access to them)
-            
+
             let simple_name = if let Some(last_dot) = actual_type_name.rfind('.') {
                 &actual_type_name[last_dot + 1..]
             } else {
                 actual_type_name
             };
-            
+
             // First try simple name
             if let Some(schema) = self.pydantic_models.get(simple_name) {
                 Some(schema.clone())

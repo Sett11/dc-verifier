@@ -440,7 +440,7 @@ impl TypeScriptCallGraphBuilder {
         Option<dc_core::models::TypeInfo>,
     ) {
         let is_mutation = call.name == "useMutation";
-        
+
         match call.generic_params.len() {
             0 => (None, None),
             1 => {
@@ -551,7 +551,7 @@ impl TypeScriptCallGraphBuilder {
     }
 
     /// Extracts request and response types from a service function
-    /// 
+    ///
     /// Tries multiple strategies:
     /// 1. Find function by exact name
     /// 2. If not found, extract all functions and find the first one with types
@@ -586,16 +586,23 @@ impl TypeScriptCallGraphBuilder {
 
         // 4. If function not found by name, try to find any function with types
         // This handles cases where function name doesn't match exactly
-        let all_functions = self.parser.extract_functions_and_classes(&module, &file_path_str, &converter);
-        
+        let all_functions =
+            self.parser
+                .extract_functions_and_classes(&module, &file_path_str, &converter);
+
         // Find first function with both request and response types, or at least response type
         for func_or_class in all_functions {
-            if let dc_core::parsers::FunctionOrClass::Function { parameters, return_type, .. } = func_or_class {
+            if let dc_core::parsers::FunctionOrClass::Function {
+                parameters,
+                return_type,
+                ..
+            } = func_or_class
+            {
                 // Prefer functions with both types, but accept any with at least response type
                 if return_type.is_some() || !parameters.is_empty() {
                     let request_type = parameters.first().map(|param| param.type_info.clone());
                     let response_type = return_type;
-                    
+
                     // If we found a function with types, use it
                     if request_type.is_some() || response_type.is_some() {
                         return Ok((request_type, response_type));

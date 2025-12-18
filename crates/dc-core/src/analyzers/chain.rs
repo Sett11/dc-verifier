@@ -455,7 +455,7 @@ impl<'a> ChainBuilder<'a> {
     }
 
     /// Determines the type of chain based on its links
-    /// 
+    ///
     /// - Full: Contains Route nodes (API endpoints) - spans multiple layers
     /// - FrontendInternal: All nodes are from TypeScript files (.ts/.tsx)
     /// - BackendInternal: All nodes are from Python files (.py)
@@ -484,7 +484,7 @@ impl<'a> ChainBuilder<'a> {
             let file_ext = Path::new(&link.location.file)
                 .extension()
                 .and_then(|e| e.to_str());
-            
+
             match file_ext {
                 Some("ts") | Some("tsx") => has_frontend = true,
                 Some("py") => has_backend = true,

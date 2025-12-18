@@ -13,10 +13,11 @@ pub enum ChainDirection {
 }
 
 /// Type of data chain
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ChainType {
     /// Full chain: Frontend → Backend → Database (or reverse)
     /// Contains all layers of the application
+    #[default]
     Full,
     /// Internal frontend call: Frontend → Frontend
     /// Only frontend components, no backend interaction
@@ -40,6 +41,8 @@ pub struct DataChain {
     /// Data flow direction
     pub direction: ChainDirection,
     /// Type of chain (full or internal)
+    /// Defaults to Full for backward compatibility with existing JSON
+    #[serde(default)]
     pub chain_type: ChainType,
 }
 
