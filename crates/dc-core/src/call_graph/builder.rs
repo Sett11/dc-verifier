@@ -402,7 +402,9 @@ impl CallGraphBuilder {
             // Check if already in cache
             if !self.pydantic_models.contains_key(&response_model_name) {
                 // Try to resolve from imports
-                if let Err(err) = self.resolve_schema_from_imports(&response_model_name, current_file) {
+                if let Err(err) =
+                    self.resolve_schema_from_imports(&response_model_name, current_file)
+                {
                     if self.verbose {
                         eprintln!(
                             "[DEBUG] Failed to resolve schema '{}' from imports in {:?}: {}",
@@ -527,11 +529,11 @@ impl CallGraphBuilder {
         let imports = self
             .parser
             .extract_imports(module_ast, &file_path_str, converter);
-        
+
         // Store import information for schema resolution
         let normalized_file = Self::normalize_path(file_path);
         let mut file_imports_map = HashMap::new();
-        
+
         for import in &imports {
             if let Err(err) = self.process_import(module_node, import, file_path) {
                 eprintln!(
@@ -539,7 +541,7 @@ impl CallGraphBuilder {
                     import.path, file_path, err
                 );
             }
-            
+
             // Store import mapping: imported name -> module path
             if !import.names.is_empty() {
                 // from module import name1, name2
@@ -553,12 +555,12 @@ impl CallGraphBuilder {
                 file_imports_map.insert(import.path.clone(), import.path.clone());
             }
         }
-        
+
         // Store the import map after processing all imports
         if !file_imports_map.is_empty() {
             self.file_imports.insert(normalized_file, file_imports_map);
         }
-        
+
         Ok(())
     }
 
@@ -1614,24 +1616,24 @@ impl CallGraphBuilder {
         current_file: &Path,
     ) -> Result<()> {
         let normalized_file = Self::normalize_path(current_file);
-        
+
         // Check if we have import information for this file
         let Some(imports_map) = self.file_imports.get(&normalized_file) else {
             return Ok(()); // No imports recorded for this file
         };
-        
+
         // Find the module path for this schema name
         let Some(module_path_str) = imports_map.get(schema_name) else {
             return Ok(()); // Schema not found in imports
         };
-        
+
         // Resolve the module path to a file path
         let module_file = self.resolve_import_path(module_path_str, current_file)?;
-        
+
         // Extract and cache Pydantic models from the imported module
         // This will populate pydantic_models cache with the schema
         self.extract_and_cache_pydantic_models(&module_file)?;
-        
+
         // Check if the schema is now in cache
         if self.pydantic_models.contains_key(schema_name) {
             if self.verbose {
@@ -1641,7 +1643,7 @@ impl CallGraphBuilder {
                 );
             }
         }
-        
+
         Ok(())
     }
 

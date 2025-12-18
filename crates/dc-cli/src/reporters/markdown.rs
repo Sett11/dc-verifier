@@ -238,7 +238,7 @@ impl MarkdownReporter {
             let mut type_mismatch_recs: Vec<_> = Vec::new();
             let mut missing_field_recs: Vec<_> = Vec::new();
             let mut other_recs: Vec<_> = Vec::new();
-            
+
             for (severity, rec) in &recommendations {
                 if rec.contains("schema validation") || rec.contains("Missing schema") {
                     missing_schema_recs.push((severity, rec));
@@ -250,7 +250,7 @@ impl MarkdownReporter {
                     other_recs.push((severity, rec));
                 }
             }
-            
+
             if !missing_schema_recs.is_empty() {
                 report.push_str("### 🔴 Endpoints without response_model or request schemas\n\n");
                 for (_, rec) in missing_schema_recs {
@@ -258,7 +258,7 @@ impl MarkdownReporter {
                 }
                 report.push('\n');
             }
-            
+
             if !type_mismatch_recs.is_empty() {
                 report.push_str("### 🟡 Type mismatches\n\n");
                 for (_, rec) in type_mismatch_recs {
@@ -266,7 +266,7 @@ impl MarkdownReporter {
                 }
                 report.push('\n');
             }
-            
+
             if !missing_field_recs.is_empty() {
                 report.push_str("### 🟡 Missing required fields\n\n");
                 for (_, rec) in missing_field_recs {
@@ -274,7 +274,7 @@ impl MarkdownReporter {
                 }
                 report.push('\n');
             }
-            
+
             if !other_recs.is_empty() {
                 report.push_str("### ⚠️ Other issues\n\n");
                 for (_, rec) in other_recs {
@@ -557,20 +557,21 @@ impl MarkdownReporter {
                                 dc_core::models::SeverityLevel::Medium => "MEDIUM",
                                 dc_core::models::SeverityLevel::Low => "LOW",
                             };
-                            
+
                             // Determine if it's a request or response issue
-                            let issue_type = if severity_level == dc_core::models::SeverityLevel::Critical {
-                                "request parameter"
-                            } else {
-                                "response"
-                            };
-                            
+                            let issue_type =
+                                if severity_level == dc_core::models::SeverityLevel::Critical {
+                                    "request parameter"
+                                } else {
+                                    "response"
+                                };
+
                             // Extract file name from location
                             let file_name = std::path::Path::new(&mismatch.location.file)
                                 .file_name()
                                 .and_then(|n| n.to_str())
                                 .unwrap_or(&mismatch.location.file);
-                            
+
                             format!(
                                 "[{}] Add Pydantic schema validation for {} in chain '{}' at {}:{}.\n  \
                                 **File:** `{}`\n  \
