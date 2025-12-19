@@ -6,15 +6,13 @@ use std::path::Path;
 
 /// Extractor for route parameters
 pub struct ParameterExtractor {
-    graph: CallGraph,
     dto_extractor: Option<crate::dto::DTOExtractor>,
 }
 
 impl ParameterExtractor {
     /// Creates a new parameter extractor
-    pub fn new(graph: CallGraph) -> Self {
+    pub fn new() -> Self {
         Self {
-            graph,
             dto_extractor: None,
         }
     }
@@ -28,6 +26,7 @@ impl ParameterExtractor {
     /// Extracts route parameters and returns request/response types
     pub fn extract_route_parameters(
         &mut self,
+        graph: &CallGraph,
         method_node: NodeId,
         _method_decorators: &[&TypeScriptDecorator],
         parameter_decorators: &[&TypeScriptDecorator],
@@ -59,7 +58,7 @@ impl ParameterExtractor {
         };
 
         // 2. Extract return type from method node → response type
-        let response_type = self.extract_method_return_type(method_node)?;
+        let response_type = self.extract_method_return_type(graph, method_node)?;
 
         Ok((request_type, response_type))
     }
@@ -85,8 +84,12 @@ impl ParameterExtractor {
     }
 
     /// Extracts return type from method node
-    fn extract_method_return_type(&self, method_node: NodeId) -> Result<Option<TypeInfo>> {
-        if let Some(CallNode::Method { return_type, .. }) = self.graph.node_weight(method_node.0) {
+    fn extract_method_return_type(
+        &self,
+        graph: &CallGraph,
+        method_node: NodeId,
+    ) -> Result<Option<TypeInfo>> {
+        if let Some(CallNode::Method { return_type, .. }) = graph.node_weight(method_node.0) {
             Ok(return_type.clone())
         } else {
             Ok(None)

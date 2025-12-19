@@ -107,6 +107,7 @@ impl NestJSDecoratorProcessor {
                                 // Now use extractor (mutable borrow)
                                 if let Some(ref mut extractor) = self.parameter_extractor {
                                     extractor.extract_route_parameters(
+                                        &self.graph,
                                         method_node,
                                         &method_decs,
                                         &param_decs,

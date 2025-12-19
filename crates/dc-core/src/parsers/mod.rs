@@ -9,7 +9,7 @@ pub use python::*;
 pub use typescript::*;
 
 // Re-export TypeScript-specific types
-pub use typescript::{TypeScriptDecorator, DecoratorTarget};
+pub use typescript::{DecoratorTarget, TypeScriptDecorator};
 
 /// Module/function import
 #[derive(Debug, Clone)]

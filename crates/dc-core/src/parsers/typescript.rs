@@ -2037,12 +2037,9 @@ impl TypeScriptParser {
 
             // Пытаемся найти декораторы перед параметром в исходном коде
             // Это приблизительный подход - ищем @Body(), @Query(), @Param() перед именем параметра
-            if let Some(decorator_info) = self.find_parameter_decorator_in_source(
-                source,
-                &param_name,
-                param.span,
-                converter,
-            ) {
+            if let Some(decorator_info) =
+                self.find_parameter_decorator_in_source(source, &param_name, param.span, converter)
+            {
                 if let (Some(class), Some(method)) = (class_name, method_name) {
                     decorators.push(TypeScriptDecorator {
                         name: decorator_info.name,
@@ -2081,33 +2078,24 @@ impl TypeScriptParser {
         let search_text = &source[search_start..param_end.min(source.len())];
 
         // Ищем паттерны декораторов NestJS
-        let decorator_patterns = [
-            ("Body", "@Body()"),
-            ("Query", "@Query()"),
-            ("Param", "@Param()"),
-            ("Headers", "@Headers()"),
-            ("Req", "@Req()"),
-            ("Res", "@Res()"),
-        ];
+        let decorator_prefixes = ["Body", "Query", "Param", "Headers", "Req", "Res"];
 
-        for (name, pattern) in &decorator_patterns {
-            if let Some(pos) = search_text.rfind(pattern) {
+        for name in &decorator_prefixes {
+            let pattern = format!("@{}(", name);
+            if let Some(pos) = search_text.rfind(&pattern) {
                 // Найдено, создаем декоратор
                 let decorator_pos = search_start + pos;
                 let (line, column) = converter.byte_offset_to_location(decorator_pos);
 
-                // Пытаемся извлечь аргументы (если есть @Param('id'))
+                // Извлекаем аргументы из скобок
                 let mut args = Vec::new();
-                let after_decorator = &search_text[pos + pattern.len()..];
-                if let Some(arg_start) = after_decorator.find('(') {
-                    if let Some(arg_end) = after_decorator[arg_start + 1..].find(')') {
-                        let arg_text = &after_decorator[arg_start + 1..arg_start + 1 + arg_end];
-                        if !arg_text.trim().is_empty() {
-                            // Убираем кавычки
-                            let arg = arg_text.trim().trim_matches('\'').trim_matches('"');
-                            if !arg.is_empty() {
-                                args.push(arg.to_string());
-                            }
+                let after_at_and_name = &search_text[pos + pattern.len()..];
+                if let Some(paren_end) = after_at_and_name.find(')') {
+                    let arg_text = &after_at_and_name[..paren_end];
+                    if !arg_text.trim().is_empty() {
+                        let arg = arg_text.trim().trim_matches('\'').trim_matches('"');
+                        if !arg.is_empty() {
+                            args.push(arg.to_string());
                         }
                     }
                 }
@@ -2151,12 +2139,10 @@ impl TypeScriptParser {
                 };
                 Some(format!("{}.{}", obj_name, prop_name))
             }
-            Expr::Call(call) => {
-                match &call.callee {
-                    swc_ecma_ast::Callee::Expr(expr) => self.get_decorator_name_from_expr_inner(expr),
-                    _ => None,
-                }
-            }
+            Expr::Call(call) => match &call.callee {
+                swc_ecma_ast::Callee::Expr(expr) => self.get_decorator_name_from_expr_inner(expr),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -2276,10 +2262,7 @@ pub enum DecoratorTarget {
     /// Decorator on a class
     Class(String),
     /// Decorator on a method
-    Method {
-        class: String,
-        method: String,
-    },
+    Method { class: String, method: String },
     /// Decorator on a parameter
     Parameter {
         class: String,
