@@ -9,6 +9,12 @@ pub struct ParameterExtractor {
     dto_extractor: Option<crate::dto::DTOExtractor>,
 }
 
+impl Default for ParameterExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ParameterExtractor {
     /// Creates a new parameter extractor
     pub fn new() -> Self {

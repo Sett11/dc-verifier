@@ -2123,15 +2123,15 @@ impl TypeScriptParser {
 
     /// Gets decorator name from SWC AST expression
     fn get_decorator_name_from_expr(&self, decorator: &swc_ecma_ast::Decorator) -> Option<String> {
-        self.get_decorator_name_from_expr_inner(decorator.expr.as_ref())
+        Self::get_decorator_name_from_expr_inner(decorator.expr.as_ref())
     }
 
     /// Helper to get decorator name recursively
-    fn get_decorator_name_from_expr_inner(&self, expr: &swc_ecma_ast::Expr) -> Option<String> {
+    fn get_decorator_name_from_expr_inner(expr: &swc_ecma_ast::Expr) -> Option<String> {
         match expr {
             Expr::Ident(ident) => Some(ident.sym.as_ref().to_string()),
             Expr::Member(member) => {
-                let obj_name = self.get_decorator_name_from_expr_inner(member.obj.as_ref())?;
+                let obj_name = Self::get_decorator_name_from_expr_inner(member.obj.as_ref())?;
                 let prop_name = match &member.prop {
                     swc_ecma_ast::MemberProp::Ident(ident) => ident.sym.as_ref().to_string(),
                     swc_ecma_ast::MemberProp::Computed(_) => return None,
@@ -2140,7 +2140,7 @@ impl TypeScriptParser {
                 Some(format!("{}.{}", obj_name, prop_name))
             }
             Expr::Call(call) => match &call.callee {
-                swc_ecma_ast::Callee::Expr(expr) => self.get_decorator_name_from_expr_inner(expr),
+                swc_ecma_ast::Callee::Expr(expr) => Self::get_decorator_name_from_expr_inner(expr),
                 _ => None,
             },
             _ => None,
@@ -2182,7 +2182,7 @@ impl TypeScriptParser {
             },
             Expr::Ident(ident) => ident.sym.as_ref().to_string(),
             Expr::Member(member) => {
-                let obj = self.expr_to_string_for_decorator_inner(member.obj.as_ref());
+                let obj = Self::expr_to_string_for_decorator_inner(member.obj.as_ref());
                 let prop = match &member.prop {
                     swc_ecma_ast::MemberProp::Ident(ident) => ident.sym.as_ref().to_string(),
                     _ => "?".to_string(),
@@ -2194,11 +2194,11 @@ impl TypeScriptParser {
     }
 
     /// Helper to convert expression to string
-    fn expr_to_string_for_decorator_inner(&self, expr: &swc_ecma_ast::Expr) -> String {
+    fn expr_to_string_for_decorator_inner(expr: &swc_ecma_ast::Expr) -> String {
         match expr {
             Expr::Ident(ident) => ident.sym.as_ref().to_string(),
             Expr::Member(member) => {
-                let obj = self.expr_to_string_for_decorator_inner(member.obj.as_ref());
+                let obj = Self::expr_to_string_for_decorator_inner(member.obj.as_ref());
                 let prop = match &member.prop {
                     swc_ecma_ast::MemberProp::Ident(ident) => ident.sym.as_ref().to_string(),
                     _ => "?".to_string(),

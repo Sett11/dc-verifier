@@ -10,6 +10,12 @@ pub struct DTOExtractor {
     dto_classes: HashMap<String, SchemaReference>,
 }
 
+impl Default for DTOExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DTOExtractor {
     /// Creates a new DTO extractor
     pub fn new() -> Self {
@@ -123,7 +129,7 @@ impl DTOExtractor {
                 if class == _class_name {
                     param_decorators
                         .entry(parameter.clone())
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(decorator);
                 }
             }

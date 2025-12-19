@@ -46,14 +46,14 @@ impl NestJSDecoratorProcessor {
                 DecoratorTarget::Class(class_name) => {
                     class_decorators
                         .entry(class_name.clone())
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(decorator);
                 }
                 DecoratorTarget::Method { class, method } => {
                     let key = (class.clone(), method.clone());
                     method_decorators
                         .entry(key)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(decorator);
                 }
                 DecoratorTarget::Parameter {
@@ -96,8 +96,7 @@ impl NestJSDecoratorProcessor {
                                 let method_params = self.get_method_parameters(method_node)?;
 
                                 // Get method decorators and parameter decorators for this method
-                                let method_decs: Vec<&TypeScriptDecorator> =
-                                    decorators.iter().copied().collect();
+                                let method_decs: Vec<&TypeScriptDecorator> = decorators.to_vec();
                                 let param_decs: Vec<&TypeScriptDecorator> = parameter_decorators
                                     .iter()
                                     .filter(|(k, _)| k.0 == *class_name && k.1 == *method_name)
