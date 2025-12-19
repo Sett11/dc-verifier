@@ -392,10 +392,12 @@ impl CallGraphBuilder {
 
         // Try to resolve response_model from imports if not found in cache
         if let Some(ref response_model_str) = response_model_type {
-            let response_model_name = response_model_str
+            // Extract base model name (handle generic types like Page[ItemRead] -> ItemRead)
+            let base_model_name = self.parser.extract_base_model_from_response_model(response_model_str);
+            let response_model_name = base_model_name
                 .rsplit('.')
                 .next()
-                .unwrap_or(response_model_str)
+                .unwrap_or(&base_model_name)
                 .trim()
                 .to_string();
 
@@ -410,6 +412,23 @@ impl CallGraphBuilder {
                             "[DEBUG] Failed to resolve schema '{}' from imports in {:?}: {}",
                             response_model_name, current_file, err
                         );
+                    }
+                }
+            }
+            
+            // Ensure schema is enriched with JSON schema if available
+            if let Some(model) = self.pydantic_models.get_mut(&response_model_name) {
+                if let Some(ref extractor) = self.schema_extractor {
+                    // Check if schema already has JSON schema in metadata
+                    if !model.metadata.contains_key("json_schema") {
+                        if let Err(err) = extractor.enrich_schema(model) {
+                            if self.verbose {
+                                eprintln!(
+                                    "[DEBUG] Failed to enrich schema for {}: {}",
+                                    response_model_name, err
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -428,11 +447,12 @@ impl CallGraphBuilder {
         // Check response_model and return type correspondence
         if let Some(return_type_info) = handler_returns_data {
             if let Some(ref response_model_str) = response_model_type {
-                // Extract type name from response_model (e.g., "User" or "db.schemas.User")
-                let response_model_name = response_model_str
+                // Extract base model name (handle generic types like Page[ItemRead] -> ItemRead)
+                let base_model_name = self.parser.extract_base_model_from_response_model(response_model_str);
+                let response_model_name = base_model_name
                     .rsplit('.')
                     .next()
-                    .unwrap_or(response_model_str)
+                    .unwrap_or(&base_model_name)
                     .trim()
                     .to_string();
 
@@ -1460,9 +1480,10 @@ impl CallGraphBuilder {
         let candidate = if import_path.starts_with('.') {
             self.resolve_relative_import(import_path, &base_dir)
         } else {
-            // For absolute imports, try both:
+            // For absolute imports, try multiple strategies:
             // 1. From project root (standard absolute import)
             // 2. From current file's directory (common pattern: api.routers from api/main.py)
+            // 3. From app directory (for imports like "app.schemas" from "app/routes/items.py")
             let absolute_candidate = self.resolve_absolute_import(import_path);
 
             // Try relative resolution first (common case: api.routers from api/main.py)
@@ -1494,12 +1515,63 @@ impl CallGraphBuilder {
                 }
                 path
             };
+            
+            // Try resolving from app directory (for imports like "app.schemas")
+            // This handles cases where file is in app/routes/items.py and imports from app/schemas.py
+            let app_dir_candidate = {
+                // Find "app" directory by going up from current file
+                let mut search_path = base_dir.clone();
+                let mut app_dir: Option<PathBuf> = None;
+                
+                // Look for "app" directory in parent directories
+                while let Some(parent) = search_path.parent() {
+                    if let Some(dir_name) = parent.file_name().and_then(|n| n.to_str()) {
+                        if dir_name == "app" {
+                            app_dir = Some(parent.to_path_buf());
+                            break;
+                        }
+                    }
+                    search_path = parent.to_path_buf();
+                }
+                
+                if let Some(app_dir_path) = app_dir {
+                    // If import starts with "app.", resolve from app directory
+                    if import_path.starts_with("app.") {
+                        let remaining = &import_path[4..]; // Skip "app."
+                        let replaced = remaining.replace('.', std::path::MAIN_SEPARATOR_STR);
+                        let mut path = app_dir_path.join(&replaced);
+                        if path.is_dir() {
+                            path = path.join("__init__.py");
+                        } else if path.extension().is_none() {
+                            path.set_extension("py");
+                        }
+                        Some(path)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
 
             if self.verbose {
                 eprintln!(
-                    "[DEBUG] Trying to resolve '{}': absolute={:?}, relative={:?}",
-                    import_path, absolute_candidate, relative_candidate
+                    "[DEBUG] Trying to resolve '{}': absolute={:?}, relative={:?}, app_dir={:?}",
+                    import_path, absolute_candidate, relative_candidate, app_dir_candidate
                 );
+            }
+
+            // Try app directory first (for imports like "app.schemas")
+            if let Some(ref app_candidate) = app_dir_candidate {
+                if app_candidate.exists() {
+                    if self.verbose {
+                        eprintln!(
+                            "[DEBUG] Found '{}' via app directory resolution: {:?}",
+                            import_path, app_candidate
+                        );
+                    }
+                    return Ok(app_candidate.clone());
+                }
             }
 
             // Try relative first (more common for same-package imports)

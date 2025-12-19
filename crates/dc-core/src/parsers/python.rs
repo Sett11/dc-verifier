@@ -688,4 +688,35 @@ impl PythonParser {
 
         false
     }
+    
+    /// Extracts response_model from decorator keyword arguments
+    /// Handles patterns like:
+    /// - response_model=ItemRead
+    /// - response_model=Page[ItemRead]
+    pub fn extract_response_model_from_decorator(
+        &self,
+        decorator: &crate::call_graph::Decorator,
+    ) -> Option<String> {
+        decorator
+            .keyword_arguments
+            .get("response_model")
+            .cloned()
+    }
+    
+    /// Extracts the base model name from a response_model type
+    /// Handles generic types like Page[ItemRead] -> ItemRead
+    pub fn extract_base_model_from_response_model(&self, response_model: &str) -> String {
+        // Check if it's a generic type like Page[ItemRead]
+        if let Some(start_bracket) = response_model.find('[') {
+            if let Some(end_bracket) = response_model.rfind(']') {
+                let inner = &response_model[start_bracket + 1..end_bracket];
+                // Remove any whitespace
+                inner.trim().to_string()
+            } else {
+                response_model.to_string()
+            }
+        } else {
+            response_model.to_string()
+        }
+    }
 }

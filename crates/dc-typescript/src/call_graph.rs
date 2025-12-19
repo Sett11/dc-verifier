@@ -4,6 +4,7 @@ use dc_core::models::{Location, NodeId};
 use dc_core::parsers::{Call, TypeScriptParser};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use swc_ecma_ast;
 
 /// TypeScript call graph builder
 pub struct TypeScriptCallGraphBuilder {
@@ -20,6 +21,10 @@ pub struct TypeScriptCallGraphBuilder {
     current_depth: usize,
     /// Enable verbose debug output
     verbose: bool,
+    /// Cache for SDK function analysis results (function_name -> ApiCallInfo)
+    sdk_function_cache: HashMap<String, Option<ApiCallInfo>>,
+    /// Map of imported functions to their source files (function_name -> source_file_path)
+    imported_functions: HashMap<String, PathBuf>,
 }
 
 impl TypeScriptCallGraphBuilder {
@@ -36,6 +41,8 @@ impl TypeScriptCallGraphBuilder {
             max_depth: None,
             current_depth: 0,
             verbose: false,
+            sdk_function_cache: HashMap::new(),
+            imported_functions: HashMap::new(),
         }
     }
 
@@ -112,14 +119,35 @@ impl TypeScriptCallGraphBuilder {
             let imports = self
                 .parser
                 .extract_imports(&module, &file_path_str, &converter);
-            for import in imports {
-                if let Err(err) = self.process_import(module_node, &import, &normalized) {
+            for import in &imports {
+                if let Err(err) = self.process_import(module_node, import, &normalized) {
                     eprintln!(
                         "Error processing import '{}' from {:?}: {}",
                         import.path, normalized, err
                     );
                 }
             }
+            
+            // Track imported functions for SDK detection
+            // Handle both direct imports and export * from patterns
+            for import in &imports {
+                if let Ok(import_path) = self.resolve_import_path(&import.path, &normalized) {
+                    if self.is_sdk_file(&import_path) {
+                        // If import has specific names, track them
+                        if !import.names.is_empty() {
+                            for name in &import.names {
+                                self.imported_functions.insert(name.clone(), import_path.clone());
+                            }
+                        }
+                    }
+                    // Also check if the imported file re-exports from SDK files
+                    self.track_reexported_sdk_functions(&import_path, &normalized);
+                }
+            }
+            
+            // Also check for export * from patterns in the current file
+            // and track exported functions from SDK files
+            self.track_export_all_sdk_functions(&module, &normalized);
 
             // Extract calls
             let calls = self
@@ -330,8 +358,151 @@ impl TypeScriptCallGraphBuilder {
         Ok(callee_node)
     }
 
+    /// Checks if a file is an SDK file (openapi-client, api-client, sdk, etc.)
+    fn is_sdk_file(&self, file_path: &Path) -> bool {
+        let path_str = file_path.to_string_lossy().to_lowercase();
+        let file_name = file_path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        
+        // Check for SDK file patterns
+        path_str.contains("openapi-client")
+            || path_str.contains("api-client")
+            || path_str.contains("/sdk/")
+            || path_str.contains("\\sdk\\")
+            || file_name.contains("sdk")
+            || file_name.contains("client")
+            || file_name.ends_with(".gen.ts")
+            || file_name.ends_with(".gen.tsx")
+    }
+    
+    /// Checks if a function call is from an SDK file
+    fn is_sdk_function_call(&self, function_name: &str) -> bool {
+        self.imported_functions.contains_key(function_name)
+    }
+    
+    /// Analyzes SDK function body to extract API call information
+    fn analyze_sdk_function(&mut self, function_name: &str, source_file: &Path) -> Option<ApiCallInfo> {
+        // Check cache first
+        if let Some(cached) = self.sdk_function_cache.get(function_name) {
+            return cached.clone();
+        }
+        
+        // Parse the source file
+        let (module, source, converter) = match self.parser.parse_file(source_file) {
+            Ok(result) => result,
+            Err(_) => {
+                if self.verbose {
+                    eprintln!("[DEBUG] Failed to parse SDK file: {:?}", source_file);
+                }
+                self.sdk_function_cache.insert(function_name.to_string(), None);
+                return None;
+            }
+        };
+        
+        // Find the function definition
+        let file_path_str = source_file.to_string_lossy().to_string();
+        let function_info = match self.parser.find_function_by_name(&module, function_name, &file_path_str, &converter) {
+            Some(info) => info,
+            None => {
+                if self.verbose {
+                    eprintln!("[DEBUG] Function '{}' not found in {:?}", function_name, source_file);
+                }
+                self.sdk_function_cache.insert(function_name.to_string(), None);
+                return None;
+            }
+        };
+        
+        // Analyze function body to find client.get/post/delete calls
+        // We need to parse the source code to find the pattern:
+        // return (options?.client ?? client).get/post/delete({ url: "...", ... })
+        let api_info = self.extract_api_info_from_sdk_function(&source, &function_info.location);
+        
+        // Cache the result
+        self.sdk_function_cache.insert(function_name.to_string(), api_info.clone());
+        
+        api_info
+    }
+    
+    /// Extracts API call information from SDK function source code
+    fn extract_api_info_from_sdk_function(
+        &self,
+        source: &str,
+        function_location: &Location,
+    ) -> Option<ApiCallInfo> {
+        // Find the function body in source code
+        let start_line = function_location.line;
+        let lines: Vec<&str> = source.lines().collect();
+        
+        // Look for patterns like:
+        // - client.get({ url: "/items/" })
+        // - (options?.client ?? client).post({ url: "/items/" })
+        // - client.delete({ url: "/items/{id}" })
+        
+        // Search for client method calls in the function body
+        let mut found_method: Option<HttpMethod> = None;
+        let mut found_url: Option<String> = None;
+        
+        // Look for lines containing client.get, client.post, etc.
+        for (idx, line) in lines.iter().enumerate() {
+            if idx < start_line.saturating_sub(1) {
+                continue;
+            }
+            
+            let line_lower = line.to_lowercase();
+            
+            // Check for HTTP method patterns
+            if line_lower.contains("client.get") || line_lower.contains("?.get") || line_lower.contains("?? client).get") {
+                found_method = Some(HttpMethod::Get);
+            } else if line_lower.contains("client.post") || line_lower.contains("?.post") || line_lower.contains("?? client).post") {
+                found_method = Some(HttpMethod::Post);
+            } else if line_lower.contains("client.put") || line_lower.contains("?.put") || line_lower.contains("?? client).put") {
+                found_method = Some(HttpMethod::Put);
+            } else if line_lower.contains("client.delete") || line_lower.contains("?.delete") || line_lower.contains("?? client).delete") {
+                found_method = Some(HttpMethod::Delete);
+            } else if line_lower.contains("client.patch") || line_lower.contains("?.patch") || line_lower.contains("?? client).patch") {
+                found_method = Some(HttpMethod::Patch);
+            }
+            
+            // Extract URL from url: "..."
+            if let Some(url_start) = line_lower.find("url:") {
+                let after_url = &line[url_start + 4..];
+                // Try to extract string value
+                if let Some(quote_start) = after_url.find('"') {
+                    let url_part = &after_url[quote_start + 1..];
+                    if let Some(quote_end) = url_part.find('"') {
+                        found_url = Some(url_part[..quote_end].to_string());
+                    }
+                } else if let Some(quote_start) = after_url.find('\'') {
+                    let url_part = &after_url[quote_start + 1..];
+                    if let Some(quote_end) = url_part.find('\'') {
+                        found_url = Some(url_part[..quote_end].to_string());
+                    }
+                }
+            }
+            
+            // If we found both, we can return
+            if found_method.is_some() && found_url.is_some() {
+                break;
+            }
+        }
+        
+        if let (Some(method), Some(url)) = (found_method, found_url) {
+            Some(ApiCallInfo {
+                path: url,
+                method,
+                location: function_location.clone(),
+                request_type: None,
+                response_type: None,
+            })
+        } else {
+            None
+        }
+    }
+    
     /// Detects if a call is an API call (fetch, axios, React Query, etc.)
-    fn detect_api_call(&self, call: &Call) -> Option<ApiCallInfo> {
+    fn detect_api_call(&mut self, call: &Call) -> Option<ApiCallInfo> {
         let name = &call.name;
 
         // Check for fetch(url, options)
@@ -370,12 +541,14 @@ impl TypeScriptCallGraphBuilder {
         }
 
         // Check for api.get/post/put/delete(url, ...) or client.get/post/...
+        // Also supports optional chaining: (options?.client ?? client).get()
         let api_patterns = ["api.", "client.", "http.", "request."];
         for pattern in &api_patterns {
             if name.starts_with(pattern) {
                 let parts: Vec<&str> = name.split('.').collect();
                 if parts.len() >= 2 {
                     if let Ok(method) = parts[1].parse::<HttpMethod>() {
+                        // Try to extract URL from first argument (could be a string or object)
                         let path = call.arguments.first()?.value.clone();
                         return Some(ApiCallInfo {
                             path,
@@ -386,6 +559,41 @@ impl TypeScriptCallGraphBuilder {
                         });
                     }
                 }
+            }
+        }
+        
+        // Check for optional chaining patterns: (options?.client ?? client).get()
+        // The call name might be something like "options?.client ?? client.get" or just "get"
+        // We need to check if the call is part of a chain that includes client
+        if name.contains("client") && (name.contains("get") || name.contains("post") || name.contains("put") || name.contains("delete") || name.contains("patch")) {
+            // Try to extract method from the name
+            let method = if name.contains(".get") || name.ends_with("get") {
+                Some(HttpMethod::Get)
+            } else if name.contains(".post") || name.ends_with("post") {
+                Some(HttpMethod::Post)
+            } else if name.contains(".put") || name.ends_with("put") {
+                Some(HttpMethod::Put)
+            } else if name.contains(".delete") || name.ends_with("delete") {
+                Some(HttpMethod::Delete)
+            } else if name.contains(".patch") || name.ends_with("patch") {
+                Some(HttpMethod::Patch)
+            } else {
+                None
+            };
+            
+            if let Some(method) = method {
+                // Try to extract URL from arguments
+                // In SDK functions, URL is usually in an object: { url: "/items/", ... }
+                // For now, we'll try to get it from the first argument
+                // This is a simplified approach - full implementation would parse the object
+                let path = call.arguments.first()?.value.clone();
+                return Some(ApiCallInfo {
+                    path,
+                    method,
+                    location: call.location.clone(),
+                    request_type: None,
+                    response_type: None,
+                });
             }
         }
 
@@ -512,6 +720,17 @@ impl TypeScriptCallGraphBuilder {
                 request_type,
                 response_type,
             });
+        }
+        
+        // Check for SDK function calls (OpenAPI-generated clients)
+        // Need to clone source_file to avoid borrow checker issues
+        if self.is_sdk_function_call(name) {
+            let source_file = self.imported_functions.get(name).cloned();
+            if let Some(source_file) = source_file {
+                if let Some(api_info) = self.analyze_sdk_function(name, &source_file) {
+                    return Some(api_info);
+                }
+            }
         }
 
         None
@@ -1423,9 +1642,62 @@ impl TypeScriptCallGraphBuilder {
 
         Ok(())
     }
+    
+    /// Tracks re-exported SDK functions from a file (handles export * from patterns)
+    fn track_reexported_sdk_functions(&mut self, file_path: &Path, current_file: &Path) {
+        // Check if file was already processed to avoid infinite recursion
+        let normalized = Self::normalize_path(file_path);
+        if self.processed_files.contains(&normalized) {
+            return;
+        }
+        
+        // Try to parse the file and find export * from patterns
+        if let Ok((module, _, _)) = self.parser.parse_file(&normalized) {
+            self.track_export_all_sdk_functions(&module, current_file);
+        }
+    }
+    
+    /// Tracks exported functions from SDK files via export * from
+    fn track_export_all_sdk_functions(&mut self, module: &swc_ecma_ast::Module, current_file: &Path) {
+        for item in &module.body {
+            if let swc_ecma_ast::ModuleItem::ModuleDecl(swc_ecma_ast::ModuleDecl::ExportAll(export_all)) = item {
+                let export_path = export_all.src.value.as_str().unwrap_or("").to_string();
+                if let Ok(export_file_path) = self.resolve_import_path(&export_path, current_file) {
+                    if self.is_sdk_file(&export_file_path) {
+                        // Find all exported functions from this SDK file
+                        if let Ok((target_module, _, _)) = self.parser.parse_file(&export_file_path) {
+                            let file_path_str = export_file_path.to_string_lossy().to_string();
+                            let converter = dc_core::parsers::LocationConverter::new(String::new());
+                            let functions = self.parser.extract_functions_and_classes(
+                                &target_module,
+                                &file_path_str,
+                                &converter,
+                            );
+                            for func in functions {
+                                if let dc_core::parsers::FunctionOrClass::Function { name, .. } = func {
+                                    let name_clone = name.clone();
+                                    self.imported_functions.insert(name, export_file_path.clone());
+                                    if self.verbose {
+                                        eprintln!(
+                                            "[DEBUG] Tracked SDK function '{}' from {:?}",
+                                            name_clone, export_file_path
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Not an SDK file, but might re-export from SDK files
+                        self.track_reexported_sdk_functions(&export_file_path, current_file);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Information about an API call
+#[derive(Clone)]
 struct ApiCallInfo {
     path: String,
     method: HttpMethod,
