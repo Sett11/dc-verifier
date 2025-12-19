@@ -3,6 +3,7 @@ use crate::reporters::{JsonReporter, MarkdownReporter};
 use crate::ReportFormat;
 use anyhow::Result;
 use dc_adapter_fastapi::FastApiCallGraphBuilder;
+use dc_adapter_nestjs::NestJSCallGraphBuilder;
 use dc_core::analyzers::{ChainBuilder, ContractChecker};
 use dc_core::data_flow::DataFlowTracker;
 use dc_core::models::Severity;
@@ -69,6 +70,28 @@ pub fn execute_check(config_path: &str, format: ReportFormat, verbose: bool) -> 
                 let builder = TypeScriptCallGraphBuilder::new(src_paths)
                     .with_max_depth(config.max_recursion_depth)
                     .with_verbose(verbose);
+                let graph = builder.build_graph()?;
+
+                // Create DataFlowTracker and ChainBuilder
+                let tracker = DataFlowTracker::new(&graph);
+                let chain_builder = ChainBuilder::new(&graph, &tracker, verbose);
+
+                // Find all chains
+                let chains = chain_builder.find_all_chains()?;
+                all_chains.extend(chains);
+            }
+            "nestjs" => {
+                let src_paths = adapter_config
+                    .src_paths
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("NestJS adapter requires src_paths"))?;
+                let src_paths: Vec<PathBuf> = src_paths.iter().map(PathBuf::from).collect();
+
+                // Build call graph for NestJS
+                let mut builder = NestJSCallGraphBuilder::new(src_paths).with_verbose(verbose);
+                if let Some(max_depth) = config.max_recursion_depth {
+                    builder = builder.with_max_depth(Some(max_depth));
+                }
                 let graph = builder.build_graph()?;
 
                 // Create DataFlowTracker and ChainBuilder

@@ -35,12 +35,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Instructions for adding new adapters
   - Code review process
 - **CHANGELOG.md** for tracking changes in Keep a Changelog format
+- **NestJS adapter** (`dc-adapter-nestjs`) for TypeScript backend projects
+  - Decorator-based route extraction (`@Controller`, `@Get`, `@Post`, `@Put`, `@Delete`, `@Patch`)
+  - DTO class extraction with class-validator decorator support
+  - Parameter extraction from `@Body()`, `@Query()`, `@Param()` decorators
+  - Request/response type inference from method signatures
+  - Integration with CLI (`check.rs`, `config.rs`, `init.rs`)
+- **Frontend library support** for API call detection
+  - TanStack Query (React Query) - `useQuery`, `useMutation` with type extraction
+  - SWR - `useSWR`, `useSWRMutation` with type extraction
+  - RTK Query (Redux Toolkit Query) - `*.use*Query()`, `*.use*Mutation()` patterns
+  - tRPC - `.useQuery()`, `.useMutation()` chain patterns
+  - Apollo Client - `useQuery`, `useMutation` with GraphQL queries
+  - Next.js Server Actions - `actions.*()` function calls
+- **Enhanced TypeScript parser** with decorator extraction
+  - Class decorator extraction (`@Controller`, etc.)
+  - Method decorator extraction (`@Get`, `@Post`, etc.)
+  - Parameter decorator extraction (`@Body`, `@Query`, `@Param`)
+  - Support for decorator arguments and keyword arguments
+- **DTO class extraction** for NestJS projects
+  - Detection of class-validator decorators (`@IsString`, `@IsEmail`, `@IsOptional`, etc.)
+  - Field-level validation rule extraction
+  - Schema reference creation for DTO classes
+- **Severity levels** for contract mismatches
+  - `SeverityLevel` enum: `Low`, `Medium`, `High`, `Critical`
+  - Automatic severity assignment based on mismatch type
+  - Enhanced report recommendations with severity levels
+- **Chain type categorization**
+  - `ChainType` enum: `Full`, `FrontendInternal`, `BackendInternal`
+  - Automatic chain type detection based on node types
+  - Statistics by chain type in reports
 
 ### Changed
 - **All code comments** translated to English (main public functions and doc comments)
 - **Improved error messages** with context using `anyhow::with_context()`
 - **JsonReporter** now fully integrated into CLI (was previously marked as dead code)
-- **README.md** updated with new features (progress bars, JSON reports, max_recursion_depth, thiserror)
+- **TypeScript call graph builder** now supports multiple frontend libraries
+- **Report format** enhanced with severity levels and chain type statistics
+- **Configuration** now supports `nestjs` adapter type
+- **README.md** updated with new features (progress bars, JSON reports, max_recursion_depth, thiserror, NestJS adapter, frontend libraries)
 - **AUDIT_REPORT.md** updated with latest implementation details and test statistics
 
 ### Fixed

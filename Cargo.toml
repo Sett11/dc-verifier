@@ -2,6 +2,7 @@
 members = [
     "crates/dc-core",
     "crates/dc-adapter-fastapi",
+    "crates/dc-adapter-nestjs",
     "crates/dc-typescript",
     "crates/dc-cli",
 ]

@@ -8,6 +8,9 @@ pub use openapi::*;
 pub use python::*;
 pub use typescript::*;
 
+// Re-export TypeScript-specific types
+pub use typescript::{TypeScriptDecorator, DecoratorTarget};
+
 /// Module/function import
 #[derive(Debug, Clone)]
 pub struct Import {

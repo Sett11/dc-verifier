@@ -18,6 +18,11 @@ app_path = "backend/api/main.py"
 type = "typescript"
 src_paths = ["frontend/src"]
 
+# Example NestJS adapter configuration:
+# [[adapters]]
+# type = "nestjs"
+# src_paths = ["backend/src"]
+
 [rules]
 type_mismatch = "critical"
 missing_field = "warning"

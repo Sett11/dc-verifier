@@ -1859,6 +1859,369 @@ impl TypeScriptParser {
 
         methods
     }
+
+    /// Extracts decorators from TypeScript module
+    ///
+    /// Extracts decorators from classes, methods, and parameters
+    pub fn extract_decorators(
+        &self,
+        module: &Module,
+        file_path: &str,
+        converter: &LocationConverter,
+        source: &str,
+    ) -> Vec<TypeScriptDecorator> {
+        let mut decorators = Vec::new();
+
+        for item in &module.body {
+            match item {
+                ModuleItem::Stmt(Stmt::Decl(Decl::Class(class_decl))) => {
+                    let class_name = class_decl.ident.sym.as_ref().to_string();
+                    // Extract class decorators
+                    decorators.extend(self.extract_class_decorators(
+                        class_decl,
+                        &class_name,
+                        file_path,
+                        converter,
+                    ));
+                    // Extract method decorators
+                    decorators.extend(self.extract_method_decorators_from_class(
+                        &class_decl.class,
+                        &class_name,
+                        file_path,
+                        converter,
+                        source,
+                    ));
+                }
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export_decl)) => {
+                    if let Decl::Class(class_decl) = &export_decl.decl {
+                        let class_name = class_decl.ident.sym.as_ref().to_string();
+                        // Extract class decorators
+                        decorators.extend(self.extract_class_decorators(
+                            class_decl,
+                            &class_name,
+                            file_path,
+                            converter,
+                        ));
+                        // Extract method decorators
+                        decorators.extend(self.extract_method_decorators_from_class(
+                            &class_decl.class,
+                            &class_name,
+                            file_path,
+                            converter,
+                            source,
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        decorators
+    }
+
+    /// Extracts decorators from class declaration
+    fn extract_class_decorators(
+        &self,
+        class_decl: &swc_ecma_ast::ClassDecl,
+        class_name: &str,
+        file_path: &str,
+        converter: &LocationConverter,
+    ) -> Vec<TypeScriptDecorator> {
+        let mut decorators = Vec::new();
+
+        for decorator in &class_decl.class.decorators {
+            if let Some(name) = self.get_decorator_name_from_expr(decorator) {
+                let (args, kwargs) = self.extract_decorator_arguments_from_expr(decorator);
+                let span = decorator.span;
+                let (line, column) = converter.byte_offset_to_location(span.lo.0 as usize);
+
+                decorators.push(TypeScriptDecorator {
+                    name,
+                    arguments: args,
+                    keyword_arguments: kwargs,
+                    location: Location {
+                        file: file_path.to_string(),
+                        line,
+                        column: Some(column),
+                    },
+                    target: DecoratorTarget::Class(class_name.to_string()),
+                });
+            }
+        }
+
+        decorators
+    }
+
+    /// Extracts decorators from class methods
+    fn extract_method_decorators_from_class(
+        &self,
+        class: &swc_ecma_ast::Class,
+        class_name: &str,
+        file_path: &str,
+        converter: &LocationConverter,
+        source: &str,
+    ) -> Vec<TypeScriptDecorator> {
+        let mut decorators = Vec::new();
+
+        for member in &class.body {
+            if let swc_ecma_ast::ClassMember::Method(method) = member {
+                let method_name = match &method.key {
+                    swc_ecma_ast::PropName::Ident(ident) => ident.sym.as_ref().to_string(),
+                    swc_ecma_ast::PropName::Str(str) => {
+                        str.value.as_str().unwrap_or("").to_string()
+                    }
+                    _ => "unknown".to_string(),
+                };
+
+                // Extract method decorators
+                for decorator in &method.function.decorators {
+                    if let Some(name) = self.get_decorator_name_from_expr(decorator) {
+                        let (args, kwargs) = self.extract_decorator_arguments_from_expr(decorator);
+                        let span = decorator.span;
+                        let (line, column) = converter.byte_offset_to_location(span.lo.0 as usize);
+
+                        decorators.push(TypeScriptDecorator {
+                            name,
+                            arguments: args,
+                            keyword_arguments: kwargs,
+                            location: Location {
+                                file: file_path.to_string(),
+                                line,
+                                column: Some(column),
+                            },
+                            target: DecoratorTarget::Method {
+                                class: class_name.to_string(),
+                                method: method_name.clone(),
+                            },
+                        });
+                    }
+                }
+
+                // Extract parameter decorators
+                decorators.extend(self.extract_parameter_decorators(
+                    &method.function,
+                    Some(class_name),
+                    Some(&method_name),
+                    source,
+                    file_path,
+                    converter,
+                ));
+            }
+        }
+
+        decorators
+    }
+
+    /// Extracts parameter decorators
+    ///
+    /// В SWC AST декораторы параметров могут быть не доступны напрямую.
+    /// Парсим из исходного кода, используя позиции параметров.
+    fn extract_parameter_decorators(
+        &self,
+        function: &swc_ecma_ast::Function,
+        class_name: Option<&str>,
+        method_name: Option<&str>,
+        source: &str,
+        _file_path: &str,
+        converter: &LocationConverter,
+    ) -> Vec<TypeScriptDecorator> {
+        let mut decorators = Vec::new();
+
+        // Парсим декораторы параметров из исходного кода
+        // Ищем паттерн: @Decorator() param: Type
+        for (param_idx, param) in function.params.iter().enumerate() {
+            let param_name = match &param.pat {
+                Pat::Ident(ident) => ident.id.sym.as_ref().to_string(),
+                _ => format!("param{}", param_idx),
+            };
+
+            // Пытаемся найти декораторы перед параметром в исходном коде
+            // Это приблизительный подход - ищем @Body(), @Query(), @Param() перед именем параметра
+            if let Some(decorator_info) = self.find_parameter_decorator_in_source(
+                source,
+                &param_name,
+                param.span,
+                converter,
+            ) {
+                if let (Some(class), Some(method)) = (class_name, method_name) {
+                    decorators.push(TypeScriptDecorator {
+                        name: decorator_info.name,
+                        arguments: decorator_info.arguments,
+                        keyword_arguments: decorator_info.keyword_arguments,
+                        location: decorator_info.location,
+                        target: DecoratorTarget::Parameter {
+                            class: class.to_string(),
+                            method: method.to_string(),
+                            parameter: param_name,
+                        },
+                    });
+                }
+            }
+        }
+
+        decorators
+    }
+
+    /// Finds parameter decorator in source code
+    ///
+    /// Ищет декораторы типа @Body(), @Query(), @Param() перед параметром
+    fn find_parameter_decorator_in_source(
+        &self,
+        source: &str,
+        param_name: &str,
+        param_span: swc_common::Span,
+        converter: &LocationConverter,
+    ) -> Option<TypeScriptDecorator> {
+        // Получаем позицию параметра в исходном коде
+        let param_start = param_span.lo.0 as usize;
+        let param_end = param_span.hi.0 as usize;
+
+        // Ищем перед параметром (в пределах ~200 символов)
+        let search_start = param_start.saturating_sub(200);
+        let search_text = &source[search_start..param_end.min(source.len())];
+
+        // Ищем паттерны декораторов NestJS
+        let decorator_patterns = [
+            ("Body", "@Body()"),
+            ("Query", "@Query()"),
+            ("Param", "@Param()"),
+            ("Headers", "@Headers()"),
+            ("Req", "@Req()"),
+            ("Res", "@Res()"),
+        ];
+
+        for (name, pattern) in &decorator_patterns {
+            if let Some(pos) = search_text.rfind(pattern) {
+                // Найдено, создаем декоратор
+                let decorator_pos = search_start + pos;
+                let (line, column) = converter.byte_offset_to_location(decorator_pos);
+
+                // Пытаемся извлечь аргументы (если есть @Param('id'))
+                let mut args = Vec::new();
+                let after_decorator = &search_text[pos + pattern.len()..];
+                if let Some(arg_start) = after_decorator.find('(') {
+                    if let Some(arg_end) = after_decorator[arg_start + 1..].find(')') {
+                        let arg_text = &after_decorator[arg_start + 1..arg_start + 1 + arg_end];
+                        if !arg_text.trim().is_empty() {
+                            // Убираем кавычки
+                            let arg = arg_text.trim().trim_matches('\'').trim_matches('"');
+                            if !arg.is_empty() {
+                                args.push(arg.to_string());
+                            }
+                        }
+                    }
+                }
+
+                return Some(TypeScriptDecorator {
+                    name: name.to_string(),
+                    arguments: args,
+                    keyword_arguments: std::collections::HashMap::new(),
+                    location: Location {
+                        file: String::new(), // Будет заполнено вызывающим кодом
+                        line,
+                        column: Some(column),
+                    },
+                    target: DecoratorTarget::Parameter {
+                        class: String::new(),
+                        method: String::new(),
+                        parameter: param_name.to_string(),
+                    },
+                });
+            }
+        }
+
+        None
+    }
+
+    /// Gets decorator name from SWC AST expression
+    fn get_decorator_name_from_expr(&self, decorator: &swc_ecma_ast::Decorator) -> Option<String> {
+        self.get_decorator_name_from_expr_inner(decorator.expr.as_ref())
+    }
+
+    /// Helper to get decorator name recursively
+    fn get_decorator_name_from_expr_inner(&self, expr: &swc_ecma_ast::Expr) -> Option<String> {
+        match expr {
+            Expr::Ident(ident) => Some(ident.sym.as_ref().to_string()),
+            Expr::Member(member) => {
+                let obj_name = self.get_decorator_name_from_expr_inner(member.obj.as_ref())?;
+                let prop_name = match &member.prop {
+                    swc_ecma_ast::MemberProp::Ident(ident) => ident.sym.as_ref().to_string(),
+                    swc_ecma_ast::MemberProp::Computed(_) => return None,
+                    swc_ecma_ast::MemberProp::PrivateName(_) => return None,
+                };
+                Some(format!("{}.{}", obj_name, prop_name))
+            }
+            Expr::Call(call) => {
+                match &call.callee {
+                    swc_ecma_ast::Callee::Expr(expr) => self.get_decorator_name_from_expr_inner(expr),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Extracts decorator arguments from SWC AST expression
+    fn extract_decorator_arguments_from_expr(
+        &self,
+        decorator: &swc_ecma_ast::Decorator,
+    ) -> (Vec<String>, std::collections::HashMap<String, String>) {
+        let mut args = Vec::new();
+        let kwargs = std::collections::HashMap::new();
+
+        if let Expr::Call(call_expr) = decorator.expr.as_ref() {
+            // Extract positional arguments
+            for arg in &call_expr.args {
+                args.push(self.expr_to_string_for_decorator(arg));
+            }
+
+            // Keyword arguments are not common in TypeScript decorators,
+            // but we handle them for completeness
+            // Note: TypeScript decorators don't support keyword arguments like Python,
+            // but we keep this for potential future use
+        }
+
+        (args, kwargs)
+    }
+
+    /// Converts expression to string for decorator arguments
+    fn expr_to_string_for_decorator(&self, expr: &swc_ecma_ast::ExprOrSpread) -> String {
+        match expr.expr.as_ref() {
+            Expr::Lit(lit) => match lit {
+                Lit::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                Lit::Num(n) => n.value.to_string(),
+                Lit::Bool(b) => b.value.to_string(),
+                Lit::Null(_) => "null".to_string(),
+                _ => format!("{:?}", lit),
+            },
+            Expr::Ident(ident) => ident.sym.as_ref().to_string(),
+            Expr::Member(member) => {
+                let obj = self.expr_to_string_for_decorator_inner(member.obj.as_ref());
+                let prop = match &member.prop {
+                    swc_ecma_ast::MemberProp::Ident(ident) => ident.sym.as_ref().to_string(),
+                    _ => "?".to_string(),
+                };
+                format!("{}.{}", obj, prop)
+            }
+            _ => format!("{:?}", expr.expr),
+        }
+    }
+
+    /// Helper to convert expression to string
+    fn expr_to_string_for_decorator_inner(&self, expr: &swc_ecma_ast::Expr) -> String {
+        match expr {
+            Expr::Ident(ident) => ident.sym.as_ref().to_string(),
+            Expr::Member(member) => {
+                let obj = self.expr_to_string_for_decorator_inner(member.obj.as_ref());
+                let prop = match &member.prop {
+                    swc_ecma_ast::MemberProp::Ident(ident) => ident.sym.as_ref().to_string(),
+                    _ => "?".to_string(),
+                };
+                format!("{}.{}", obj, prop)
+            }
+            _ => format!("{:?}", expr),
+        }
+    }
 }
 
 /// Function or class from TypeScript code
@@ -1890,6 +2253,39 @@ pub struct ClassMethod {
     pub return_type: Option<TypeInfo>,
     pub is_async: bool,
     pub is_static: bool,
+}
+
+/// TypeScript decorator (for NestJS, etc.)
+#[derive(Debug, Clone)]
+pub struct TypeScriptDecorator {
+    /// Decorator name (e.g., "Controller", "Get", "Body")
+    pub name: String,
+    /// Decorator positional arguments
+    pub arguments: Vec<String>,
+    /// Decorator keyword arguments
+    pub keyword_arguments: std::collections::HashMap<String, String>,
+    /// Location in code
+    pub location: Location,
+    /// Target of the decorator (class, method, or parameter)
+    pub target: DecoratorTarget,
+}
+
+/// Target of a TypeScript decorator
+#[derive(Debug, Clone)]
+pub enum DecoratorTarget {
+    /// Decorator on a class
+    Class(String),
+    /// Decorator on a method
+    Method {
+        class: String,
+        method: String,
+    },
+    /// Decorator on a parameter
+    Parameter {
+        class: String,
+        method: String,
+        parameter: String,
+    },
 }
 
 impl Default for TypeScriptParser {

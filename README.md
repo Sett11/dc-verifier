@@ -24,6 +24,19 @@ dc-verifier analyzes data flow through a call graph:
 ### Language and Framework Support
 - ✅ **Python/FastAPI** - Python code parsing, FastAPI routes extraction, Pydantic models
 - ✅ **TypeScript** - TypeScript code parsing, extraction of imports, calls, functions, classes, methods, Zod schemas, interfaces and type aliases
+- ✅ **NestJS** - TypeScript backend framework support with decorator-based route extraction, DTO class validation, and parameter extraction
+
+### Frontend Library Support
+
+dc-verifier supports detection of API calls from various frontend libraries:
+
+- ✅ **TanStack Query (React Query)** - `useQuery`, `useMutation` hooks with type extraction
+- ✅ **SWR** - `useSWR`, `useSWRMutation` hooks with type extraction
+- ✅ **RTK Query (Redux Toolkit Query)** - `*.use*Query()`, `*.use*Mutation()` patterns
+- ✅ **tRPC** - `.useQuery()`, `.useMutation()` chain patterns
+- ✅ **Apollo Client** - `useQuery`, `useMutation` with GraphQL queries
+- ✅ **Next.js Server Actions** - `actions.*()` function calls
+- ✅ **Generic patterns** - `fetch()`, `axios.*()`, `api.*()`, `client.*()`
 
 ### Code Analysis
 - ✅ **Call graph building** - automatic graph construction for Python and TypeScript projects
@@ -120,7 +133,8 @@ Generates DOT files for call graph visualization. Files can be opened in Graphvi
 
 - `crates/dc-core/` - Core: graph building, data flow analysis, parsers, analyzers
 - `crates/dc-adapter-fastapi/` - FastAPI adapter (Python)
-- `crates/dc-typescript/` - TypeScript adapter
+- `crates/dc-adapter-nestjs/` - NestJS adapter (TypeScript backend)
+- `crates/dc-typescript/` - TypeScript adapter (frontend)
 - `crates/dc-cli/` - CLI tool
 
 ## Configuration
@@ -169,6 +183,20 @@ app_path = "app/main.py"  # Path to FastAPI application file
 type = "typescript"
 src_paths = ["src", "lib"]  # Directories with TypeScript files
 ```
+
+#### NestJS Adapter
+
+```toml
+[[adapters]]
+type = "nestjs"
+src_paths = ["src"]  # Directories with NestJS TypeScript files
+```
+
+The NestJS adapter supports:
+- Decorator-based route extraction (`@Controller`, `@Get`, `@Post`, etc.)
+- DTO class extraction with class-validator decorators
+- Parameter extraction from `@Body()`, `@Query()`, `@Param()` decorators
+- Request/response type inference from method signatures
 
 **Note:** The configuration uses the `type` field (not `adapter_type`), which is automatically mapped to `adapter_type` when loading the configuration.
 
@@ -227,6 +255,40 @@ dc-verifier visualize
 dc-verifier check --format json
 ```
 
+### NestJS Project
+
+```bash
+# 1. Create configuration
+dc-verifier init
+
+# 2. Configure dc-verifier.toml
+# Specify directories with NestJS TypeScript files
+
+# 3. Run check
+dc-verifier check
+
+# 4. View report
+cat dc-verifier-report.md
+```
+
+**Example configuration for NestJS:**
+
+```toml
+project_name = "nestjs-api"
+
+[output]
+format = "markdown"
+path = "dc-verifier-report.md"
+
+[[adapters]]
+type = "nestjs"
+src_paths = ["src"]
+
+[rules]
+type_mismatch = "critical"
+missing_field = "warning"
+```
+
 ### Mixed Project (Python + TypeScript)
 
 ```toml
@@ -260,6 +322,7 @@ dc-verifier checks the following aspects of data chains:
 1. **Type compliance** - verifies that data types match at chain stitches
 2. **Required fields** - verifies that all required fields are present
 3. **Data normalization** - checks validation (email, URL, patterns)
+4. **Decorator validation** - verifies NestJS decorators and DTO class validation rules
 
 ## Report Formats
 
@@ -297,6 +360,11 @@ The project is ready for use. Current readiness: **~98-100%**.
 - ✅ TypeScript interface and type alias extraction
 - ✅ Zod schema linking with TypeScript types
 - ✅ TypeScript schema parsing to JsonSchema
+- ✅ NestJS adapter with decorator-based route extraction
+- ✅ DTO class extraction with class-validator support
+- ✅ Frontend library support (SWR, RTK Query, tRPC, Apollo Client, Next.js)
+- ✅ Enhanced decorator processing for NestJS
+- ✅ Parameter extraction from decorators (@Body, @Query, @Param)
 - ✅ Data flow tracking
 - ✅ Contract checking
 - ✅ Graph visualization

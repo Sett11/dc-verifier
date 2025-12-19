@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 dc-core = { path = "../dc-core" }
 dc-adapter-fastapi = { path = "../dc-adapter-fastapi" }
+dc-adapter-nestjs = { path = "../dc-adapter-nestjs" }
 dc-typescript = { path = "../dc-typescript" }
 clap = { version = "4.5", features = ["derive"] }
 colored = "2.1"

@@ -129,6 +129,12 @@ To add support for a new language/framework:
    - Add adapter type validation in `Config::validate()`
    - Ensure proper error messages for missing required fields
 
+**Note for TypeScript adapters:** If your adapter uses decorators (like NestJS), you may need to:
+- Extend `TypeScriptParser` to extract decorators from SWC AST
+- Implement decorator processing logic in your call graph builder
+- Support DTO class extraction if applicable
+- See `dc-adapter-nestjs` as a reference implementation
+
 ## Code Review Process
 
 1. All PRs require at least one approval

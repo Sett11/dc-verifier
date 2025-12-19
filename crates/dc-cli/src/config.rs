@@ -109,9 +109,29 @@ impl Config {
                         }
                     }
                 }
+                "nestjs" => {
+                    // For NestJS, src_paths is required
+                    let src_paths = adapter.src_paths.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("Adapter {}: NestJS adapter requires src_paths", idx)
+                    })?;
+                    if src_paths.is_empty() {
+                        anyhow::bail!("Adapter {}: src_paths cannot be empty", idx);
+                    }
+                    for (path_idx, src_path) in src_paths.iter().enumerate() {
+                        let path = Path::new(src_path);
+                        if !path.exists() {
+                            anyhow::bail!(
+                                "Adapter {}: src_paths[{}] does not exist: {}",
+                                idx,
+                                path_idx,
+                                src_path
+                            );
+                        }
+                    }
+                }
                 _ => {
                     anyhow::bail!(
-                        "Adapter {}: Unknown adapter type: {}. Supported types: fastapi, typescript",
+                        "Adapter {}: Unknown adapter type: {}. Supported types: fastapi, typescript, nestjs",
                         idx,
                         adapter.adapter_type
                     );
