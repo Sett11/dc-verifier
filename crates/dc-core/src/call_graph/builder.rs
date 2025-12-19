@@ -1547,8 +1547,7 @@ impl CallGraphBuilder {
 
                 if let Some(app_dir_path) = app_dir {
                     // If import starts with "app.", resolve from app directory
-                    if import_path.starts_with("app.") {
-                        let remaining = &import_path[4..]; // Skip "app."
+                    if let Some(remaining) = import_path.strip_prefix("app.") {
                         let replaced = remaining.replace('.', std::path::MAIN_SEPARATOR_STR);
                         let mut path = app_dir_path.join(&replaced);
                         if path.is_dir() {
