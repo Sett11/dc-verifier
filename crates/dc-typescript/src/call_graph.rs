@@ -391,7 +391,26 @@ impl TypeScriptCallGraphBuilder {
 
         // Check for React Query hooks: useQuery, useMutation
         // These are typically used with query keys that contain URLs
+        // But first check if it's Apollo Client (has gql in arguments)
         if name == "useQuery" || name == "useMutation" {
+            // Check if it's Apollo Client call (has gql in arguments)
+            if self.is_apollo_client_call(call) {
+                // Extract types from GraphQL query
+                let (request_type, response_type) = self.extract_types_from_graphql_query(call);
+                // GraphQL usually uses POST
+                let method = HttpMethod::Post;
+                // Extract path from GraphQL operation
+                let path = self.extract_path_from_graphql_query(call);
+                return Some(ApiCallInfo {
+                    path,
+                    method,
+                    location: call.location.clone(),
+                    request_type,
+                    response_type,
+                });
+            }
+
+            // Otherwise, it's TanStack Query
             // Try to extract URL from query key (first argument)
             if let Some(first_arg) = call.arguments.first() {
                 // Query keys are often arrays like ["users", id] or objects
@@ -416,7 +435,137 @@ impl TypeScriptCallGraphBuilder {
             }
         }
 
+        // Check for SWR hooks: useSWR, useSWRMutation
+        if name == "useSWR" || name == "useSWRMutation" {
+            // Try to extract URL from key (first argument)
+            if let Some(first_arg) = call.arguments.first() {
+                let path = first_arg.value.clone();
+                let method = if name == "useSWRMutation" {
+                    HttpMethod::Post
+                } else {
+                    HttpMethod::Get
+                };
+
+                // Extract request and response types from SWR hook generic parameters
+                let (request_type, response_type) = self.extract_types_from_swr_hook(call);
+
+                return Some(ApiCallInfo {
+                    path,
+                    method,
+                    location: call.location.clone(),
+                    request_type,
+                    response_type,
+                });
+            }
+        }
+
+        // Check for RTK Query pattern: *.use*Query() or *.use*Mutation()
+        if name.contains(".use") && (name.contains("Query") || name.contains("Mutation")) {
+            let parts: Vec<&str> = name.split('.').collect();
+            if parts.len() >= 2 {
+                if let Some(hook_name) = parts.last() {
+                    // Extract endpoint and method from hook name
+                    let (endpoint, method) = self.extract_endpoint_from_rtk_hook(hook_name);
+                    // Extract types
+                    let (request_type, response_type) = self.extract_types_from_rtk_hook(call);
+                    return Some(ApiCallInfo {
+                        path: endpoint,
+                        method,
+                        location: call.location.clone(),
+                        request_type,
+                        response_type,
+                    });
+                }
+            }
+        }
+
+        // Check for tRPC pattern: chain ending with .useQuery() or .useMutation()
+        if name.ends_with(".useQuery") || name.ends_with(".useMutation") {
+            // Extract path from chain (trpc.users.get.useQuery → /trpc/users.get)
+            let path = self.extract_path_from_trpc_chain(name);
+            let method = if name.ends_with(".useMutation") {
+                HttpMethod::Post
+            } else {
+                HttpMethod::Get
+            };
+            // Extract types
+            let (request_type, response_type) = self.extract_types_from_trpc_hook(call);
+            return Some(ApiCallInfo {
+                path,
+                method,
+                location: call.location.clone(),
+                request_type,
+                response_type,
+            });
+        }
+
+        // Check for Next.js Server Actions pattern: actions.*()
+        if name.starts_with("actions.") {
+            // Extract path from action name
+            let path = self.extract_path_from_action_name(name);
+            // Extract types from server action
+            let (request_type, response_type) = self.extract_types_from_server_action(call);
+            return Some(ApiCallInfo {
+                path,
+                method: HttpMethod::Post, // Server Actions usually POST
+                location: call.location.clone(),
+                request_type,
+                response_type,
+            });
+        }
+
         None
+    }
+
+    /// Extracts types from SWR hooks (useSWR, useSWRMutation)
+    ///
+    /// For useSWR<Data, Error>:
+    /// - Data (1st) = response type
+    /// - Error (2nd) = error type (ignored)
+    ///
+    /// For useSWRMutation<Data, Error, Key, Arg>:
+    /// - Data (1st) = response type
+    /// - Error (2nd) = error type (ignored)
+    /// - Key (3rd) = key type (ignored)
+    /// - Arg (4th) = request type
+    fn extract_types_from_swr_hook(
+        &self,
+        call: &Call,
+    ) -> (
+        Option<dc_core::models::TypeInfo>,
+        Option<dc_core::models::TypeInfo>,
+    ) {
+        let is_mutation = call.name == "useSWRMutation";
+
+        match call.generic_params.len() {
+            0 => (None, None),
+            1 => {
+                // useSWR<Data> - Data = response type
+                let response = call.generic_params.first().cloned();
+                (None, response)
+            }
+            2 => {
+                // useSWR<Data, Error> - Data = response type
+                let response = call.generic_params.first().cloned();
+                (None, response)
+            }
+            4 => {
+                // useSWRMutation<Data, Error, Key, Arg>
+                // Data (1st) = response, Arg (4th) = request
+                let response = call.generic_params.first().cloned();
+                let request = if is_mutation {
+                    call.generic_params.get(3).cloned()
+                } else {
+                    None
+                };
+                (request, response)
+            }
+            _ => {
+                // Fallback: первый параметр = response
+                let response = call.generic_params.first().cloned();
+                (None, response)
+            }
+        }
     }
 
     /// Extracts types from TanStack Query hooks (useQuery, useMutation)
@@ -938,6 +1087,319 @@ impl TypeScriptCallGraphBuilder {
     /// Creates key for function
     fn function_key(path: &Path, name: &str) -> String {
         format!("{}::{}", Self::normalize_path(path).to_string_lossy(), name)
+    }
+
+    /// Extracts endpoint and HTTP method from RTK Query hook name
+    ///
+    /// Patterns:
+    /// - useGet{Resource}Query → GET /{resource}
+    /// - useCreate{Resource}Mutation → POST /{resource}
+    /// - useUpdate{Resource}ByIdMutation → PUT /{resource}/:id
+    /// - useDelete{Resource}Mutation → DELETE /{resource}/:id
+    /// - useLazy{Resource}Query → GET /{resource}
+    fn extract_endpoint_from_rtk_hook(&self, hook_name: &str) -> (String, HttpMethod) {
+        let hook_lower = hook_name.to_lowercase();
+
+        // Determine HTTP method
+        let method = if hook_lower.contains("create") || hook_lower.contains("add") {
+            HttpMethod::Post
+        } else if hook_lower.contains("update")
+            || hook_lower.contains("edit")
+            || hook_lower.contains("patch")
+        {
+            HttpMethod::Put
+        } else if hook_lower.contains("delete") || hook_lower.contains("remove") {
+            HttpMethod::Delete
+        } else {
+            HttpMethod::Get
+        };
+
+        // Extract resource name
+        let resource = hook_name
+            .trim_start_matches("use")
+            .trim_end_matches("Query")
+            .trim_end_matches("Mutation")
+            .trim_end_matches("ById")
+            .trim_end_matches("Lazy");
+
+        // Convert PascalCase to kebab-case
+        let endpoint = self.pascal_to_kebab(resource);
+
+        (format!("/{}", endpoint), method)
+    }
+
+    /// Converts PascalCase to kebab-case
+    /// Example: "GetUsers" → "get-users"
+    fn pascal_to_kebab(&self, input: &str) -> String {
+        if input.is_empty() {
+            return String::new();
+        }
+
+        let mut result = String::new();
+        let chars: Vec<char> = input.chars().collect();
+
+        for (i, ch) in chars.iter().enumerate() {
+            if ch.is_uppercase() && i > 0 {
+                result.push('-');
+            }
+            result.push(ch.to_lowercase().next().unwrap_or(*ch));
+        }
+
+        result
+    }
+
+    /// Extracts types from RTK Query hooks
+    ///
+    /// RTK Query hooks typically have types:
+    /// - useGetUsersQuery<ResponseType>() - only response type
+    /// - useCreateUserMutation<ResponseType, RequestType>() - response and request types
+    fn extract_types_from_rtk_hook(
+        &self,
+        call: &Call,
+    ) -> (
+        Option<dc_core::models::TypeInfo>,
+        Option<dc_core::models::TypeInfo>,
+    ) {
+        match call.generic_params.len() {
+            0 => (None, None),
+            1 => {
+                // Only response type
+                let response = call.generic_params.first().cloned();
+                (None, response)
+            }
+            2 => {
+                // Response and request types
+                let response = call.generic_params.first().cloned();
+                let request = call.generic_params.get(1).cloned();
+                (request, response)
+            }
+            _ => {
+                // Fallback: первый параметр = response
+                let response = call.generic_params.first().cloned();
+                (None, response)
+            }
+        }
+    }
+
+    /// Extracts path from tRPC call chain
+    ///
+    /// Examples:
+    /// - trpc.users.get.useQuery → /trpc/users.get
+    /// - api.users.list.useQuery → /trpc/users.list
+    fn extract_path_from_trpc_chain(&self, chain: &str) -> String {
+        // Remove .useQuery/.useMutation suffix
+        let without_suffix = chain
+            .trim_end_matches(".useQuery")
+            .trim_end_matches(".useMutation");
+
+        // Split by dots
+        let parts: Vec<&str> = without_suffix.split('.').collect();
+
+        if parts.is_empty() {
+            return "/trpc".to_string();
+        }
+
+        // First part is usually "trpc" or "api", rest is the path
+        let path_parts: Vec<&str> = if parts[0] == "trpc" || parts[0] == "api" {
+            parts[1..].to_vec()
+        } else {
+            parts
+        };
+
+        // Join with dots (tRPC uses dot notation)
+        let endpoint = path_parts.join(".");
+        format!("/trpc/{}", endpoint)
+    }
+
+    /// Extracts types from tRPC hooks
+    ///
+    /// tRPC hooks typically have types:
+    /// - trpc.users.get.useQuery<ResponseType>() - only response type
+    /// - trpc.users.create.useMutation<ResponseType, RequestType>() - response and request types
+    fn extract_types_from_trpc_hook(
+        &self,
+        call: &Call,
+    ) -> (
+        Option<dc_core::models::TypeInfo>,
+        Option<dc_core::models::TypeInfo>,
+    ) {
+        match call.generic_params.len() {
+            0 => (None, None),
+            1 => {
+                // Only response type
+                let response = call.generic_params.first().cloned();
+                (None, response)
+            }
+            2 => {
+                // Response and request types
+                let response = call.generic_params.first().cloned();
+                let request = call.generic_params.get(1).cloned();
+                (request, response)
+            }
+            _ => {
+                // Fallback: первый параметр = response
+                let response = call.generic_params.first().cloned();
+                (None, response)
+            }
+        }
+    }
+
+    /// Checks if a call is an Apollo Client call
+    ///
+    /// Apollo Client calls typically have `gql` in arguments or GraphQL-related patterns
+    fn is_apollo_client_call(&self, call: &Call) -> bool {
+        // Check for gql in arguments
+        let has_gql = call
+            .arguments
+            .iter()
+            .any(|arg| arg.value.contains("gql") || arg.value.contains("graphql"));
+
+        has_gql
+    }
+
+    /// Extracts path from GraphQL query
+    ///
+    /// GraphQL typically uses a single endpoint like /graphql or /api/graphql
+    fn extract_path_from_graphql_query(&self, _call: &Call) -> String {
+        // GraphQL typically uses a single endpoint
+        // In practice, this could be /graphql, /api/graphql, etc.
+        // For now, we'll use a default path
+        "/graphql".to_string()
+    }
+
+    /// Extracts types from GraphQL query (Apollo Client)
+    ///
+    /// Apollo Client uses generic parameters:
+    /// - useQuery<ResponseType, VariablesType>(...)
+    /// - useMutation<ResponseType, VariablesType>(...)
+    fn extract_types_from_graphql_query(
+        &self,
+        call: &Call,
+    ) -> (
+        Option<dc_core::models::TypeInfo>,
+        Option<dc_core::models::TypeInfo>,
+    ) {
+        match call.generic_params.len() {
+            0 => (None, None),
+            1 => {
+                // Only response type
+                let response = call.generic_params.first().cloned();
+                (None, response)
+            }
+            2 => {
+                // Response and variables (request) types
+                let response = call.generic_params.first().cloned();
+                let request = call.generic_params.get(1).cloned();
+                (request, response)
+            }
+            _ => {
+                // Fallback: первый параметр = response
+                let response = call.generic_params.first().cloned();
+                (None, response)
+            }
+        }
+    }
+
+    /// Extracts path from Next.js Server Action name
+    ///
+    /// Examples:
+    /// - actions.createUser → /api/createUser
+    /// - actions.users.create → /api/users/create
+    fn extract_path_from_action_name(&self, name: &str) -> String {
+        let without_prefix = name.trim_start_matches("actions.");
+        let parts: Vec<&str> = without_prefix.split('.').collect();
+        format!("/api/{}", parts.join("/"))
+    }
+
+    /// Extracts types from Next.js Server Action
+    ///
+    /// Server Actions are functions, so we need to find the function definition
+    /// and extract types from parameters (request) and return type (response).
+    /// For now, we'll return None as this requires finding the function definition.
+    fn extract_types_from_server_action(
+        &self,
+        _call: &Call,
+    ) -> (
+        Option<dc_core::models::TypeInfo>,
+        Option<dc_core::models::TypeInfo>,
+    ) {
+        // TODO: Find function definition and extract types from parameters and return type
+        // This requires searching the call graph for the function definition
+        (None, None)
+    }
+
+    /// Detects NestJS route from function or class
+    ///
+    /// This is a placeholder for future NestJS support.
+    /// For full support, we need to:
+    /// 1. Extract decorators from TypeScript AST (@Get, @Post, @Controller, etc.)
+    /// 2. Extract DTO classes with validation decorators
+    /// 3. Extract types from @Body(), @Query(), @Param() decorators
+    ///
+    /// Currently, this function is not called but is prepared for future integration
+    /// when TypeScript parser is extended to extract decorators.
+    #[allow(dead_code)]
+    fn detect_nestjs_route(
+        &self,
+        _func_or_class: &dc_core::parsers::FunctionOrClass,
+    ) -> Option<ApiCallInfo> {
+        // TODO: Implement when TypeScript parser supports decorator extraction
+        // This requires:
+        // 1. Extracting decorators from class and method definitions
+        // 2. Parsing @Controller('path') and @Get('route') decorators
+        // 3. Extracting DTO types from @Body(), @Query(), @Param()
+        // 4. Building full path from controller and route decorators
+        None
+    }
+
+    /// Extracts HTTP method from NestJS decorator name
+    ///
+    /// Examples: "Get" -> HttpMethod::Get, "Post" -> HttpMethod::Post
+    #[allow(dead_code)]
+    fn extract_http_method_from_nestjs_decorator(
+        &self,
+        decorator_name: &str,
+    ) -> Option<HttpMethod> {
+        match decorator_name {
+            "Get" | "GET" => Some(HttpMethod::Get),
+            "Post" | "POST" => Some(HttpMethod::Post),
+            "Put" | "PUT" => Some(HttpMethod::Put),
+            "Delete" | "DELETE" => Some(HttpMethod::Delete),
+            "Patch" | "PATCH" => Some(HttpMethod::Patch),
+            _ => None,
+        }
+    }
+
+    /// Extracts path from NestJS decorators
+    ///
+    /// Combines @Controller('base') and @Get('route') into full path
+    #[allow(dead_code)]
+    fn extract_path_from_nestjs_decorators(
+        &self,
+        _controller_path: Option<&str>,
+        _route_path: Option<&str>,
+    ) -> String {
+        // TODO: Combine controller and route paths
+        // Example: @Controller('users') + @Get('profile') -> /users/profile
+        "/".to_string()
+    }
+
+    /// Extracts types from NestJS handler function
+    ///
+    /// Extracts request type from @Body() parameter and response type from return type
+    #[allow(dead_code)]
+    fn extract_types_from_nestjs_handler(
+        &self,
+        _func: &dc_core::parsers::FunctionOrClass,
+    ) -> (
+        Option<dc_core::models::TypeInfo>,
+        Option<dc_core::models::TypeInfo>,
+    ) {
+        // TODO: Extract types from function parameters and return type
+        // This requires:
+        // 1. Finding @Body() parameter for request type
+        // 2. Using return type for response type
+        (None, None)
     }
 
     #[allow(clippy::only_used_in_recursion)]
