@@ -393,7 +393,9 @@ impl CallGraphBuilder {
         // Try to resolve response_model from imports if not found in cache
         if let Some(ref response_model_str) = response_model_type {
             // Extract base model name (handle generic types like Page[ItemRead] -> ItemRead)
-            let base_model_name = self.parser.extract_base_model_from_response_model(response_model_str);
+            let base_model_name = self
+                .parser
+                .extract_base_model_from_response_model(response_model_str);
             let response_model_name = base_model_name
                 .rsplit('.')
                 .next()
@@ -415,7 +417,7 @@ impl CallGraphBuilder {
                     }
                 }
             }
-            
+
             // Ensure schema is enriched with JSON schema if available
             if let Some(model) = self.pydantic_models.get_mut(&response_model_name) {
                 if let Some(ref extractor) = self.schema_extractor {
@@ -448,7 +450,9 @@ impl CallGraphBuilder {
         if let Some(return_type_info) = handler_returns_data {
             if let Some(ref response_model_str) = response_model_type {
                 // Extract base model name (handle generic types like Page[ItemRead] -> ItemRead)
-                let base_model_name = self.parser.extract_base_model_from_response_model(response_model_str);
+                let base_model_name = self
+                    .parser
+                    .extract_base_model_from_response_model(response_model_str);
                 let response_model_name = base_model_name
                     .rsplit('.')
                     .next()
@@ -1515,15 +1519,22 @@ impl CallGraphBuilder {
                 }
                 path
             };
-            
+
             // Try resolving from app directory (for imports like "app.schemas")
             // This handles cases where file is in app/routes/items.py and imports from app/schemas.py
             let app_dir_candidate = {
                 // Find "app" directory by going up from current file
                 let mut search_path = base_dir.clone();
                 let mut app_dir: Option<PathBuf> = None;
-                
-                // Look for "app" directory in parent directories
+
+                // First check if base_dir itself is named "app"
+                if let Some(dir_name) = search_path.file_name().and_then(|n| n.to_str()) {
+                    if dir_name == "app" {
+                        app_dir = Some(search_path.clone());
+                    }
+                }
+
+                // Then look for "app" directory in parent directories
                 while let Some(parent) = search_path.parent() {
                     if let Some(dir_name) = parent.file_name().and_then(|n| n.to_str()) {
                         if dir_name == "app" {
@@ -1533,7 +1544,7 @@ impl CallGraphBuilder {
                     }
                     search_path = parent.to_path_buf();
                 }
-                
+
                 if let Some(app_dir_path) = app_dir {
                     // If import starts with "app.", resolve from app directory
                     if import_path.starts_with("app.") {

@@ -35,6 +35,12 @@ pub struct Call {
     pub location: crate::models::Location,
     /// Name of function/method containing the call
     pub caller: Option<String>,
+    /// Base object name for member expressions (e.g., "client" in "client.get()")
+    pub base_object: Option<String>,
+    /// Property name for member expressions (e.g., "get" in "client.get()")
+    pub property: Option<String>,
+    /// Whether the call uses optional chaining (?.)
+    pub uses_optional_chaining: bool,
 }
 
 /// Function call argument

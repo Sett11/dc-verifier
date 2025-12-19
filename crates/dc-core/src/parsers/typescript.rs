@@ -299,6 +299,10 @@ impl TypeScriptParser {
                         Some(context.join("."))
                     };
 
+                    // Extract AST information for member expressions
+                    let (base_object, property, uses_optional_chaining) =
+                        self.extract_member_info(&call_expr.callee);
+
                     calls.push(Call {
                         name,
                         arguments,
@@ -309,6 +313,9 @@ impl TypeScriptParser {
                             column: Some(column),
                         },
                         caller,
+                        base_object,
+                        property,
+                        uses_optional_chaining,
                     });
                 }
 
@@ -433,6 +440,78 @@ impl TypeScriptParser {
             },
             Callee::Super(_) => Some("super".to_string()),
             Callee::Import(_) => Some("import".to_string()),
+        }
+    }
+
+    /// Extracts member expression information from Callee
+    /// Returns (base_object, property, uses_optional_chaining)
+    #[allow(clippy::only_used_in_recursion)]
+    fn extract_member_info(&self, callee: &Callee) -> (Option<String>, Option<String>, bool) {
+        match callee {
+            Callee::Expr(expr) => match expr.as_ref() {
+                Expr::Member(member_expr) => {
+                    let base = self.extract_base_from_expr(&member_expr.obj);
+                    let property = match &member_expr.prop {
+                        MemberProp::Ident(ident) => Some(ident.sym.as_ref().to_string()),
+                        MemberProp::Computed(computed) => {
+                            if let Expr::Lit(Lit::Str(str)) = computed.expr.as_ref() {
+                                Some(str.value.as_str().unwrap_or("").to_string())
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    // MemberExpr doesn't have optional field, check if base uses optional chaining
+                    let uses_optional_chaining = self.has_optional_chaining(&member_expr.obj);
+                    (base, property, uses_optional_chaining)
+                }
+                Expr::OptChain(opt_chain) => {
+                    // Handle optional chaining expression
+                    if let OptChainBase::Member(member) = opt_chain.base.as_ref() {
+                        let base = self.extract_base_from_expr(&member.obj);
+                        let property = match &member.prop {
+                            MemberProp::Ident(ident) => Some(ident.sym.as_ref().to_string()),
+                            MemberProp::Computed(computed) => {
+                                if let Expr::Lit(Lit::Str(str)) = computed.expr.as_ref() {
+                                    Some(str.value.as_str().unwrap_or("").to_string())
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        };
+                        (base, property, true)
+                    } else {
+                        (None, None, true)
+                    }
+                }
+                _ => (None, None, false),
+            },
+            _ => (None, None, false),
+        }
+    }
+
+    /// Checks if expression uses optional chaining
+    #[allow(clippy::only_used_in_recursion)]
+    fn has_optional_chaining(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::OptChain(_) => true,
+            Expr::Member(member_expr) => self.has_optional_chaining(&member_expr.obj),
+            _ => false,
+        }
+    }
+
+    /// Extracts base object name from expression
+    #[allow(clippy::only_used_in_recursion)]
+    fn extract_base_from_expr(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Ident(ident) => Some(ident.sym.as_ref().to_string()),
+            Expr::Member(member_expr) => {
+                // For chained calls like a.b.c, extract the base
+                self.extract_base_from_expr(&member_expr.obj)
+            }
+            _ => None,
         }
     }
 
