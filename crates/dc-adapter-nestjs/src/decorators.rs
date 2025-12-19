@@ -51,10 +51,7 @@ impl NestJSDecoratorProcessor {
                 }
                 DecoratorTarget::Method { class, method } => {
                     let key = (class.clone(), method.clone());
-                    method_decorators
-                        .entry(key)
-                        .or_default()
-                        .push(decorator);
+                    method_decorators.entry(key).or_default().push(decorator);
                 }
                 DecoratorTarget::Parameter {
                     class,
