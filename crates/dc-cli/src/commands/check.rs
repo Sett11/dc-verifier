@@ -53,7 +53,7 @@ pub fn execute_check(config_path: &str, format: ReportFormat, verbose: bool) -> 
             .openapi_path
             .as_ref()
             .or(config.openapi_path.as_ref())
-            .map(|p| PathBuf::from(p));
+            .map(PathBuf::from);
 
         match adapter_config.adapter_type.as_str() {
             "fastapi" => {
