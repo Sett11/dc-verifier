@@ -177,13 +177,21 @@ impl PythonParser {
                                 }
                                 ast::Stmt::Assign(assign_stmt) => {
                                     // Check for model_config = {"from_attributes": True}
-                                    if let Some(target) = assign_stmt.targets.first() {
-                                        if let ast::Expr::Name(name) = target {
-                                            if name.id.as_str() == "model_config" {
-                                                if let Some(config_dict) =
-                                                    self.extract_model_config(&assign_stmt.value)
+                                    if let Some(ast::Expr::Name(name)) = assign_stmt.targets.first()
+                                    {
+                                        if name.id.as_str() == "model_config" {
+                                            if let Some(config_dict) =
+                                                self.extract_model_config(&assign_stmt.value)
+                                            {
+                                                // Check the value, not just key existence
+                                                if let Some(value) =
+                                                    config_dict.get("from_attributes")
                                                 {
-                                                    if config_dict.contains_key("from_attributes") {
+                                                    // Accept True, "True", or true
+                                                    if value == "True"
+                                                        || value == "true"
+                                                        || value == &true.to_string()
+                                                    {
                                                         has_from_attributes = true;
                                                     }
                                                 }
@@ -842,36 +850,81 @@ impl PythonParser {
                     // Optional[T] -> extract T
                     return (true, slice_str);
                 } else if base == "Union" {
-                    // Union[T, None] or Union[None, T] -> extract T
-                    // Parse slice to find non-None type
+                    // Union[T1, T2, None] -> collect all non-None types
                     if let ast::Expr::Tuple(tuple) = sub.slice.as_ref() {
+                        let mut types = Vec::new();
+                        let mut has_none = false;
                         for elt in &tuple.elts {
                             let elt_str = self.expr_to_string(elt);
-                            if elt_str != "None" {
-                                return (true, elt_str);
+                            if elt_str == "None" {
+                                has_none = true;
+                            } else {
+                                types.push(elt_str);
                             }
+                        }
+                        if !types.is_empty() {
+                            let combined = if types.len() == 1 {
+                                types[0].clone()
+                            } else {
+                                format!("Union[{}]", types.join(", "))
+                            };
+                            return (has_none, combined);
                         }
                     }
                 }
                 (false, self.expr_to_string(expr))
             }
             ast::Expr::BinOp(bin_op) => {
-                // Check for str | None (Python 3.10+ union syntax)
+                // Check for str | int | None (Python 3.10+ union syntax)
                 // rustpython_parser uses Operator enum
                 use rustpython_parser::ast::Operator;
                 if matches!(bin_op.op, Operator::BitOr) {
-                    let left_str = self.expr_to_string(bin_op.left.as_ref());
-                    let right_str = self.expr_to_string(bin_op.right.as_ref());
+                    // Recursively collect all types from nested BitOr operations
+                    let (left_optional, left_types) =
+                        self.collect_union_types(bin_op.left.as_ref());
+                    let (right_optional, right_types) =
+                        self.collect_union_types(bin_op.right.as_ref());
 
-                    if left_str == "None" {
-                        return (true, right_str);
-                    } else if right_str == "None" {
-                        return (true, left_str);
+                    let mut all_types = left_types;
+                    all_types.extend(right_types);
+                    let has_none = left_optional || right_optional;
+
+                    if !all_types.is_empty() {
+                        let combined = if all_types.len() == 1 {
+                            all_types[0].clone()
+                        } else {
+                            format!("Union[{}]", all_types.join(", "))
+                        };
+                        return (has_none, combined);
                     }
                 }
                 (false, self.expr_to_string(expr))
             }
             _ => (false, self.expr_to_string(expr)),
+        }
+    }
+
+    /// Recursively collects all types from a union expression (handles nested BitOr)
+    /// Returns (has_none, vec_of_types)
+    fn collect_union_types(&self, expr: &ast::Expr) -> (bool, Vec<String>) {
+        use rustpython_parser::ast::Operator;
+        match expr {
+            ast::Expr::BinOp(bin_op) if matches!(bin_op.op, Operator::BitOr) => {
+                let (left_optional, mut left_types) =
+                    self.collect_union_types(bin_op.left.as_ref());
+                let (right_optional, right_types) = self.collect_union_types(bin_op.right.as_ref());
+                left_types.extend(right_types);
+                (left_optional || right_optional, left_types)
+            }
+            _ => {
+                let type_str = self.expr_to_string(expr);
+                let has_none = type_str == "None";
+                if has_none {
+                    (true, Vec::new())
+                } else {
+                    (false, vec![type_str])
+                }
+            }
         }
     }
 }

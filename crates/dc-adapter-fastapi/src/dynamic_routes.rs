@@ -3,7 +3,8 @@ use dc_core::call_graph::{CallGraph, CallNode, HttpMethod};
 use dc_core::models::{Location, NodeId};
 use rustpython_parser::ast;
 use rustpython_parser::{parse, Mode};
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 /// Information about a dynamically generated endpoint
 #[derive(Debug, Clone)]
@@ -25,21 +26,34 @@ struct FastAPIUsersRouter {
 /// Analyzer for dynamically generated FastAPI routes (e.g., fastapi_users)
 pub struct DynamicRoutesAnalyzer {
     verbose: bool,
+    /// Cache of include_router calls with their prefixes (path -> prefix)
+    include_router_prefixes: HashMap<PathBuf, Vec<(usize, String)>>,
 }
 
 impl DynamicRoutesAnalyzer {
     pub fn new(verbose: bool) -> Self {
-        Self { verbose }
+        Self {
+            verbose,
+            include_router_prefixes: HashMap::new(),
+        }
     }
 
     /// Analyzes main.py file for dynamic route generation
     /// Returns a list of dynamic endpoints found
-    pub fn analyze_main_file(&self, main_file: &Path) -> Result<Vec<DynamicEndpoint>> {
+    pub fn analyze_main_file(&mut self, main_file: &Path) -> Result<Vec<DynamicEndpoint>> {
         let source = std::fs::read_to_string(main_file)?;
         let ast = parse(&source, Mode::Module, main_file.to_string_lossy().as_ref())?;
 
+        // First pass: collect all include_router calls with their prefixes and line numbers
+        if let ast::Mod::Module(module) = &ast {
+            for (idx, stmt) in module.body.iter().enumerate() {
+                self.collect_include_router_prefixes(stmt, main_file, idx);
+            }
+        }
+
         let mut endpoints = Vec::new();
 
+        // Second pass: analyze statements and use collected prefixes
         if let ast::Mod::Module(module) = ast {
             for stmt in &module.body {
                 self.analyze_statement(stmt, main_file, &mut endpoints)?;
@@ -49,31 +63,50 @@ impl DynamicRoutesAnalyzer {
         Ok(endpoints)
     }
 
+    /// Collects include_router calls with their prefixes for later use
+    fn collect_include_router_prefixes(&mut self, stmt: &ast::Stmt, file: &Path, line_idx: usize) {
+        if let ast::Stmt::Expr(expr_stmt) = stmt {
+            if let ast::Expr::Call(call_expr) = expr_stmt.value.as_ref() {
+                if let ast::Expr::Attribute(attr) = call_expr.func.as_ref() {
+                    if attr.attr.as_str() == "include_router" {
+                        // Extract prefix from keyword arguments
+                        for kw in &call_expr.keywords {
+                            if let Some(arg_name) = &kw.arg {
+                                if arg_name.as_str() == "prefix" {
+                                    if let Some(prefix_str) = self.extract_string_value(&kw.value) {
+                                        self.include_router_prefixes
+                                            .entry(file.to_path_buf())
+                                            .or_default()
+                                            .push((line_idx, prefix_str));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn analyze_statement(
         &self,
         stmt: &ast::Stmt,
         current_file: &Path,
         endpoints: &mut Vec<DynamicEndpoint>,
     ) -> Result<()> {
-        match stmt {
-            ast::Stmt::Expr(expr_stmt) => {
-                if let ast::Expr::Call(call_expr) = expr_stmt.value.as_ref() {
-                    self.analyze_call(call_expr, current_file, endpoints)?;
-                }
-            }
-            ast::Stmt::Assign(assign_stmt) => {
-                // Check for app.include_router(...) assignments
-                for target in &assign_stmt.targets {
-                    if let ast::Expr::Attribute(attr) = target {
-                        if attr.attr.as_str() == "include_router" {
-                            if let ast::Expr::Call(call_expr) = assign_stmt.value.as_ref() {
-                                self.analyze_call(call_expr, current_file, endpoints)?;
-                            }
-                        }
+        if let ast::Stmt::Expr(expr_stmt) = stmt {
+            // Check for app.include_router(...) method calls
+            if let ast::Expr::Call(call_expr) = expr_stmt.value.as_ref() {
+                // Check if this is an include_router call
+                if let ast::Expr::Attribute(attr) = call_expr.func.as_ref() {
+                    if attr.attr.as_str() == "include_router" {
+                        self.analyze_include_router(call_expr, current_file, endpoints)?;
+                        return Ok(());
                     }
                 }
+                // Otherwise, analyze as regular call
+                self.analyze_call(call_expr, current_file, endpoints)?;
             }
-            _ => {}
         }
         Ok(())
     }
@@ -94,8 +127,7 @@ impl DynamicRoutesAnalyzer {
         // Check if this is a fastapi_users router generator call
         if let Some(router_info) = self.identify_router_generator(call_expr) {
             // Extract prefix from parent include_router call if available
-            // For now, we'll use default prefixes
-            let prefix = self.extract_prefix_from_context(call_expr);
+            let prefix = self.extract_prefix_from_context(call_expr, current_file);
             let mut router_endpoints = router_info.endpoints.clone();
 
             // Extract schemas from call arguments
@@ -104,17 +136,7 @@ impl DynamicRoutesAnalyzer {
             // Apply prefix and schemas to endpoints
             for endpoint in &mut router_endpoints {
                 endpoint.path = format!("{}{}", prefix, endpoint.path);
-
-                // Map schemas to endpoints based on router configuration
-                if !schemas.is_empty() {
-                    if router_info.schema_params.contains(&"response_schema") && !schemas.is_empty()
-                    {
-                        endpoint.response_schema = Some(schemas[0].clone());
-                    }
-                    if router_info.schema_params.contains(&"request_schema") && schemas.len() > 1 {
-                        endpoint.request_schema = Some(schemas[1].clone());
-                    }
-                }
+                self.apply_schemas_to_endpoint(endpoint, &router_info, &schemas);
             }
 
             endpoints.extend(router_endpoints);
@@ -146,32 +168,22 @@ impl DynamicRoutesAnalyzer {
 
         // Analyze router call if it's a fastapi_users generator
         if let Some(router_expr) = router_call {
-            // router_expr is &Box<Expr>, Box automatically dereferences through Deref
-            // Use &*router_expr to get &Expr
-            if let ast::Expr::Call(router_call_expr) = &*router_expr {
-                if let Some(router_info) = self.identify_router_generator(&router_call_expr) {
+            // router_expr is &Box<Expr>, which automatically coerces to &Expr via Deref
+            // We can pattern match directly on router_expr since &Box<Expr> -> &Expr coercion happens
+            // Use explicit coercion: &*router_expr gives &Box<Expr>, then * gives Box<Expr>, then & gives &Expr
+            // Actually, just use router_expr directly - Rust will coerce &Box<Expr> to &Expr automatically
+            let expr_ref: &ast::Expr = router_expr;
+            if let ast::Expr::Call(ref router_call_expr) = expr_ref {
+                if let Some(router_info) = self.identify_router_generator(router_call_expr) {
                     // Extract schemas from router call arguments
-                    let schemas = self.extract_schemas_from_call(&router_call_expr);
+                    let schemas = self.extract_schemas_from_call(router_call_expr);
 
                     let mut router_endpoints = router_info.endpoints.clone();
 
                     // Apply prefix and schemas
                     for endpoint in &mut router_endpoints {
                         endpoint.path = format!("{}{}", prefix, endpoint.path);
-
-                        // Map schemas based on router configuration
-                        if !schemas.is_empty() {
-                            if router_info.schema_params.contains(&"response_schema")
-                                && !schemas.is_empty()
-                            {
-                                endpoint.response_schema = Some(schemas[0].clone());
-                            }
-                            if router_info.schema_params.contains(&"request_schema")
-                                && schemas.len() > 1
-                            {
-                                endpoint.request_schema = Some(schemas[1].clone());
-                            }
-                        }
+                        self.apply_schemas_to_endpoint(endpoint, &router_info, &schemas);
                     }
 
                     endpoints.extend(router_endpoints);
@@ -180,6 +192,25 @@ impl DynamicRoutesAnalyzer {
         }
 
         Ok(())
+    }
+
+    /// Applies schemas to an endpoint based on router configuration
+    fn apply_schemas_to_endpoint(
+        &self,
+        endpoint: &mut DynamicEndpoint,
+        router_info: &FastAPIUsersRouter,
+        schemas: &[String],
+    ) {
+        if schemas.is_empty() {
+            return;
+        }
+
+        if router_info.schema_params.contains(&"response_schema") {
+            endpoint.response_schema = Some(schemas[0].clone());
+        }
+        if router_info.schema_params.contains(&"request_schema") && schemas.len() > 1 {
+            endpoint.request_schema = Some(schemas[1].clone());
+        }
     }
 
     fn identify_router_generator(&self, call_expr: &ast::ExprCall) -> Option<FastAPIUsersRouter> {
@@ -294,11 +325,11 @@ impl DynamicRoutesAnalyzer {
         let mut schemas = Vec::new();
 
         for arg in &call_expr.args {
-            // args is Vec<Box<Expr>>, Box automatically dereferences through Deref
-            // Use &*arg to get &Expr
-            if let ast::Expr::Name(name) = &*arg {
+            // args is Vec<Box<Expr>>, arg is &Box<Expr>, which coerces to &Expr via Deref
+            let expr_ref: &ast::Expr = arg;
+            if let ast::Expr::Name(name) = expr_ref {
                 schemas.push(name.id.to_string());
-            } else if let ast::Expr::Attribute(attr) = &*arg {
+            } else if let ast::Expr::Attribute(attr) = expr_ref {
                 // Handle qualified names like app.schemas.UserRead
                 let base = self.expr_to_string(attr.value.as_ref());
                 let full_name = format!("{}.{}", base, attr.attr);
@@ -319,9 +350,9 @@ impl DynamicRoutesAnalyzer {
                 // Handle f-strings - simplified version
                 let mut result = String::new();
                 for value in &joined_str.values {
-                    // joined_str.values is Vec<Box<Expr>>, Box automatically dereferences through Deref
-                    // Use &*value to get &Expr
-                    if let ast::Expr::Constant(constant) = &*value {
+                    // joined_str.values is Vec<Box<Expr>>, value is &Box<Expr>, which coerces to &Expr via Deref
+                    let expr_ref: &ast::Expr = value;
+                    if let ast::Expr::Constant(constant) = expr_ref {
                         if let ast::Constant::Str(s) = &constant.value {
                             result.push_str(s);
                         }
@@ -333,11 +364,26 @@ impl DynamicRoutesAnalyzer {
         }
     }
 
-    fn extract_prefix_from_context(&self, _call_expr: &ast::ExprCall) -> String {
-        // Default prefix - in real implementation, this would be extracted from parent include_router
+    /// Extracts prefix from context by finding the nearest include_router call
+    /// This is a simplified implementation that looks for include_router calls in the same file
+    fn extract_prefix_from_context(
+        &self,
+        _call_expr: &ast::ExprCall,
+        current_file: &Path,
+    ) -> String {
+        // Try to find include_router calls in the same file
+        if let Some(prefixes) = self.include_router_prefixes.get(current_file) {
+            // For now, return the first prefix found
+            // In a more sophisticated implementation, we would match by line number or AST position
+            if let Some((_, prefix)) = prefixes.first() {
+                return prefix.clone();
+            }
+        }
+        // Default: no prefix
         String::new()
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn expr_to_string(&self, expr: &ast::Expr) -> String {
         match expr {
             ast::Expr::Name(name) => name.id.to_string(),
@@ -396,8 +442,8 @@ impl DynamicRoutesAnalyzer {
 
             if self.verbose {
                 eprintln!(
-                    "[DEBUG] Created virtual route: {} {}",
-                    format!("{:?}", endpoint.method),
+                    "[DEBUG] Created virtual route: {:?} {}",
+                    endpoint.method,
                     endpoint.path
                 );
             }

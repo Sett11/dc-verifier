@@ -17,6 +17,33 @@ pub struct OpenAPILinker {
 }
 
 impl OpenAPILinker {
+    /// Converts HttpMethod to lowercase string
+    fn http_method_to_str(method: HttpMethod) -> &'static str {
+        match method {
+            HttpMethod::Get => "get",
+            HttpMethod::Post => "post",
+            HttpMethod::Put => "put",
+            HttpMethod::Patch => "patch",
+            HttpMethod::Delete => "delete",
+            HttpMethod::Options => "options",
+            HttpMethod::Head => "head",
+        }
+    }
+
+    /// Converts string to HttpMethod
+    fn str_to_http_method(s: &str) -> Option<HttpMethod> {
+        match s.to_lowercase().as_str() {
+            "get" => Some(HttpMethod::Get),
+            "post" => Some(HttpMethod::Post),
+            "put" => Some(HttpMethod::Put),
+            "patch" => Some(HttpMethod::Patch),
+            "delete" => Some(HttpMethod::Delete),
+            "options" => Some(HttpMethod::Options),
+            "head" => Some(HttpMethod::Head),
+            _ => None,
+        }
+    }
+
     /// Creates a new linker from OpenAPI schema
     pub fn new(schema: OpenAPISchema) -> Self {
         let endpoints = OpenAPIParser::extract_endpoints(&schema);
@@ -30,7 +57,7 @@ impl OpenAPILinker {
             // Index by path and method
             endpoint_index
                 .entry(endpoint.path.clone())
-                .or_insert_with(HashMap::new)
+                .or_default()
                 .insert(endpoint.method.to_lowercase(), idx);
 
             // Index by operation_id if present
@@ -54,15 +81,7 @@ impl OpenAPILinker {
         path: &str,
         method: HttpMethod,
     ) -> Option<&OpenAPIEndpoint> {
-        let method_str = match method {
-            HttpMethod::Get => "get",
-            HttpMethod::Post => "post",
-            HttpMethod::Put => "put",
-            HttpMethod::Patch => "patch",
-            HttpMethod::Delete => "delete",
-            HttpMethod::Options => "options",
-            HttpMethod::Head => "head",
-        };
+        let method_str = Self::http_method_to_str(method);
 
         self.endpoint_index
             .get(path)?
@@ -76,7 +95,7 @@ impl OpenAPILinker {
     }
 
     /// Links a Pydantic model name to an OpenAPI schema
-    /// Tries exact match first, then case-insensitive, then partial match
+    /// Uses conservative matching: exact match, case-insensitive, then common variants
     pub fn link_pydantic_to_openapi(&self, pydantic_name: &str) -> Option<&OpenAPISchemaComponent> {
         // Try exact match
         if let Some(schema) = self.schemas.get(pydantic_name) {
@@ -90,10 +109,29 @@ impl OpenAPILinker {
             }
         }
 
-        // Try partial match (e.g., "ItemRead" matches "ItemRead" or "ItemReadSchema")
-        for (name, schema) in &self.schemas {
-            if name.contains(pydantic_name) || pydantic_name.contains(name) {
+        // Try common Pydantic variants with suffixes/prefixes
+        let variants = [
+            format!("{}Schema", pydantic_name),
+            format!("{}Model", pydantic_name),
+            format!("{}Request", pydantic_name),
+            format!("{}Response", pydantic_name),
+            format!("{}DTO", pydantic_name),
+            pydantic_name.trim_end_matches("Schema").to_string(),
+            pydantic_name.trim_end_matches("Model").to_string(),
+            pydantic_name.trim_end_matches("Request").to_string(),
+            pydantic_name.trim_end_matches("Response").to_string(),
+            pydantic_name.trim_end_matches("DTO").to_string(),
+        ];
+
+        for variant in &variants {
+            if let Some(schema) = self.schemas.get(variant) {
                 return Some(schema);
+            }
+            // Also try case-insensitive for variants
+            for (name, schema) in &self.schemas {
+                if name.eq_ignore_ascii_case(variant) {
+                    return Some(schema);
+                }
             }
         }
 
@@ -101,7 +139,7 @@ impl OpenAPILinker {
     }
 
     /// Links a TypeScript type name to an OpenAPI schema
-    /// Similar to link_pydantic_to_openapi but handles TypeScript naming conventions
+    /// Uses conservative matching: exact match, case-insensitive, then TypeScript-specific variants
     pub fn link_typescript_to_openapi(
         &self,
         typescript_name: &str,
@@ -118,22 +156,36 @@ impl OpenAPILinker {
             }
         }
 
-        // Try removing common TypeScript suffixes/prefixes
+        // Try common TypeScript variants with suffixes/prefixes
         let normalized = typescript_name
             .trim_start_matches("I")
             .trim_end_matches("Type")
             .trim_end_matches("Interface");
 
-        for (name, schema) in &self.schemas {
-            if name.eq_ignore_ascii_case(normalized) {
+        let variants = [
+            format!("{}Props", normalized),
+            format!("{}State", normalized),
+            format!("{}Component", normalized),
+            format!("{}Schema", normalized),
+            format!("{}Model", normalized),
+            format!("{}Request", normalized),
+            format!("{}Response", normalized),
+            typescript_name.trim_end_matches("Props").to_string(),
+            typescript_name.trim_end_matches("State").to_string(),
+            typescript_name.trim_end_matches("Component").to_string(),
+            typescript_name.trim_end_matches("Type").to_string(),
+            typescript_name.trim_end_matches("Interface").to_string(),
+        ];
+
+        for variant in &variants {
+            if let Some(schema) = self.schemas.get(variant) {
                 return Some(schema);
             }
-        }
-
-        // Try partial match
-        for (name, schema) in self.schemas.iter() {
-            if name.contains(typescript_name) || typescript_name.contains(name.as_str()) {
-                return Some(schema);
+            // Also try case-insensitive for variants
+            for (name, schema) in &self.schemas {
+                if name.eq_ignore_ascii_case(variant) {
+                    return Some(schema);
+                }
             }
         }
 
@@ -180,15 +232,8 @@ impl OpenAPILinker {
             .collect();
 
         for endpoint in &self.endpoints {
-            let method = match endpoint.method.to_lowercase().as_str() {
-                "get" => HttpMethod::Get,
-                "post" => HttpMethod::Post,
-                "put" => HttpMethod::Put,
-                "patch" => HttpMethod::Patch,
-                "delete" => HttpMethod::Delete,
-                "options" => HttpMethod::Options,
-                "head" => HttpMethod::Head,
-                _ => continue,
+            let Some(method) = Self::str_to_http_method(&endpoint.method) else {
+                continue;
             };
 
             if !discovered_set.contains(&(endpoint.path.as_str(), method)) {
@@ -209,7 +254,7 @@ impl OpenAPILinker {
         let mut links = Vec::new();
 
         // For each OpenAPI schema, try to find corresponding Frontend and Backend schemas
-        for (schema_name, _schema_component) in &self.schemas {
+        for schema_name in self.schemas.keys() {
             // Try to find corresponding TypeScript type
             let typescript_type = frontend_types
                 .iter()

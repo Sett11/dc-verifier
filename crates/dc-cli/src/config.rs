@@ -161,36 +161,33 @@ impl Config {
 
         // Validate global openapi_path if specified
         if let Some(ref openapi_path) = self.openapi_path {
-            let path = Path::new(openapi_path);
-            if !path.exists() {
-                anyhow::bail!("Global openapi_path does not exist: {}", openapi_path);
-            }
-            if !path.is_file() {
-                anyhow::bail!("Global openapi_path must be a file: {}", openapi_path);
-            }
+            Self::validate_openapi_path(openapi_path, "Global openapi_path")?;
         }
 
         // Validate adapter openapi_path if specified
         for (idx, adapter) in self.adapters.iter().enumerate() {
             if let Some(ref openapi_path) = adapter.openapi_path {
-                let path = Path::new(openapi_path);
-                if !path.exists() {
-                    anyhow::bail!(
-                        "Adapter {}: openapi_path does not exist: {}",
-                        idx,
-                        openapi_path
-                    );
-                }
-                if !path.is_file() {
-                    anyhow::bail!(
-                        "Adapter {}: openapi_path must be a file: {}",
-                        idx,
-                        openapi_path
-                    );
-                }
+                Self::validate_openapi_path(
+                    openapi_path,
+                    &format!("Adapter {}: openapi_path", idx),
+                )?;
             }
         }
 
+        Ok(())
+    }
+
+    /// Validates that a path exists and is a readable file
+    fn validate_openapi_path(path_str: &str, context: &str) -> Result<()> {
+        let path = Path::new(path_str);
+        if !path.exists() {
+            anyhow::bail!("{} does not exist: {}", context, path_str);
+        }
+        if !path.is_file() {
+            anyhow::bail!("{} must be a file: {}", context, path_str);
+        }
+        // Check readability
+        fs::metadata(path).with_context(|| format!("{} is not readable: {}", context, path_str))?;
         Ok(())
     }
 }

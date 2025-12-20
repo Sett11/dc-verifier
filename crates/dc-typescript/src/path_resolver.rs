@@ -32,12 +32,26 @@ impl TypeScriptPathResolver {
         resolver
     }
 
-    /// Loads path mappings from tsconfig.json
+    /// Loads path mappings from tsconfig.json with support for extends
     fn load_tsconfig(&mut self, project_root: &Path) -> Result<()> {
+        self.load_tsconfig_recursive(
+            project_root,
+            project_root,
+            &mut std::collections::HashSet::new(),
+        )
+    }
+
+    /// Recursively loads tsconfig.json and resolves extends field
+    fn load_tsconfig_recursive(
+        &mut self,
+        project_root: &Path,
+        config_dir: &Path,
+        visited: &mut std::collections::HashSet<PathBuf>,
+    ) -> Result<()> {
         // Try to find tsconfig.json
         let tsconfig_paths = [
-            project_root.join("tsconfig.json"),
-            project_root.join("tsconfig.base.json"),
+            config_dir.join("tsconfig.json"),
+            config_dir.join("tsconfig.base.json"),
         ];
 
         let mut tsconfig_path = None;
@@ -50,6 +64,15 @@ impl TypeScriptPathResolver {
 
         let tsconfig_path = tsconfig_path.context("tsconfig.json not found")?;
 
+        // Prevent infinite recursion
+        let normalized_path = tsconfig_path
+            .canonicalize()
+            .unwrap_or_else(|_| tsconfig_path.clone());
+        if visited.contains(&normalized_path) {
+            return Ok(()); // Already visited, skip
+        }
+        visited.insert(normalized_path.clone());
+
         // Read and parse JSON
         let content = std::fs::read_to_string(&tsconfig_path)
             .with_context(|| format!("Failed to read {:?}", tsconfig_path))?;
@@ -57,7 +80,51 @@ impl TypeScriptPathResolver {
         let json: Value = serde_json::from_str(&content)
             .with_context(|| format!("Failed to parse {:?}", tsconfig_path))?;
 
-        // Extract baseUrl
+        // First, load extended config if present
+        if let Some(extends_str) = json.get("extends").and_then(|v| v.as_str()) {
+            // Resolve extends path (relative to current config file's directory)
+            let extends_path = if extends_str.starts_with('.') {
+                // Relative path
+                config_dir.join(extends_str)
+            } else {
+                // Absolute path or node_modules resolution (simplified: treat as relative)
+                config_dir.join(extends_str)
+            };
+
+            // Try to resolve as file or directory
+            let base_config_dir = if extends_path.is_file() {
+                extends_path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| config_dir.to_path_buf())
+            } else if extends_path.is_dir() {
+                extends_path.clone()
+            } else {
+                // Try with .json extension
+                let with_json = extends_path.with_extension("json");
+                if with_json.is_file() {
+                    with_json
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| config_dir.to_path_buf())
+                } else {
+                    config_dir.to_path_buf() // Fallback to current directory
+                }
+            };
+
+            // Recursively load base config
+            let extends_path_for_error = extends_path.clone();
+            if let Err(err) = self.load_tsconfig_recursive(project_root, &base_config_dir, visited)
+            {
+                // Log warning but continue
+                eprintln!(
+                    "[WARN] Failed to load extended config from {:?}: {}",
+                    extends_path_for_error, err
+                );
+            }
+        }
+
+        // Extract baseUrl (current config overrides extended)
         if let Some(base_url_str) = json
             .get("compilerOptions")
             .and_then(|opts| opts.get("baseUrl"))
@@ -71,7 +138,7 @@ impl TypeScriptPathResolver {
             self.base_url = Some(base_url);
         }
 
-        // Extract paths
+        // Extract paths (current config paths are added to extended ones)
         if let Some(paths) = json
             .get("compilerOptions")
             .and_then(|opts| opts.get("paths"))
@@ -107,9 +174,10 @@ impl TypeScriptPathResolver {
     /// Checks if import path matches a pattern
     fn matches_pattern(&self, import_path: &str, pattern: &str) -> bool {
         // Handle wildcard patterns like "@/*"
-        if pattern.ends_with("/*") {
-            let prefix = &pattern[..pattern.len() - 2];
-            import_path.starts_with(prefix)
+        if let Some(prefix) = pattern.strip_suffix("/*") {
+            // Require slash boundary: ensure character after prefix is a slash
+            let boundary = format!("{}/", prefix);
+            import_path.starts_with(&boundary)
         } else {
             // Exact match
             import_path == pattern
@@ -120,16 +188,14 @@ impl TypeScriptPathResolver {
     fn apply_mapping(&self, import_path: &str, pattern: &str, target: &str) -> Option<PathBuf> {
         let base = self.base_url.as_ref().unwrap_or(&self.project_root);
 
-        if pattern.ends_with("/*") {
+        if let Some(prefix) = pattern.strip_suffix("/*") {
             // Wildcard pattern: "@/*" -> "src/*"
-            let prefix = &pattern[..pattern.len() - 2];
             if let Some(remaining) = import_path.strip_prefix(prefix) {
                 // Remove leading slash if present
                 let remaining = remaining.trim_start_matches('/');
 
                 // Replace * in target with remaining path
-                if target.ends_with("/*") {
-                    let target_base = &target[..target.len() - 2];
+                if let Some(target_base) = target.strip_suffix("/*") {
                     return Some(base.join(target_base).join(remaining));
                 } else {
                     // Target doesn't have wildcard, just append remaining
@@ -150,8 +216,7 @@ impl TypeScriptPathResolver {
     pub fn is_path_mapping(&self, import_path: &str) -> bool {
         // Check if import path starts with any known pattern prefix
         for (pattern, _) in &self.mappings {
-            if pattern.ends_with("/*") {
-                let prefix = &pattern[..pattern.len() - 2];
+            if let Some(prefix) = pattern.strip_suffix("/*") {
                 if import_path.starts_with(prefix) {
                     return true;
                 }

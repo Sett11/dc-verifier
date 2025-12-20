@@ -54,7 +54,7 @@ impl OpenAPIParser {
                 .values()
                 .next()
                 .and_then(|media| media.schema.as_ref())
-                .and_then(|schema_ref| Self::extract_schema_name(schema_ref))
+                .and_then(Self::extract_schema_name)
         })
     }
 

@@ -87,7 +87,7 @@ impl FastApiCallGraphBuilder {
         let openapi_linker = self.openapi_linker;
 
         // Analyze dynamic routes (fastapi_users, etc.)
-        let dynamic_analyzer = DynamicRoutesAnalyzer::new(verbose);
+        let mut dynamic_analyzer = DynamicRoutesAnalyzer::new(verbose);
 
         // Get the graph (before dynamic routes processing)
         let mut graph =
@@ -198,18 +198,54 @@ impl FastApiCallGraphBuilder {
 
                 // Try to enrich handler function with OpenAPI schema information
                 if let Some(CallNode::Route { handler, .. }) = graph.node_weight(node_id.0) {
-                    // Get handler node to enrich its return type with OpenAPI response schema
-                    if let Some(_handler_node) = graph.node_weight(handler.0) {
-                        // If OpenAPI has response schema, we can link it
-                        if let Some(ref response_schema_name) = endpoint.response_schema {
-                            if let Some(_schema) = linker.get_schema(response_schema_name) {
+                    // If OpenAPI has response schema, enrich handler's return type
+                    if let Some(ref response_schema_name) = endpoint.response_schema {
+                        if let Some(_schema) = linker.get_schema(response_schema_name) {
+                            // Get handler node to enrich its return type
+                            if let Some(handler_node) = graph.node_weight_mut(handler.0) {
+                                // Create SchemaReference for OpenAPI schema
+                                let schema_ref = dc_core::models::SchemaReference {
+                                    name: response_schema_name.clone(),
+                                    schema_type: dc_core::models::SchemaType::OpenAPI,
+                                    location: dc_core::models::Location {
+                                        file: format!("openapi://{}", response_schema_name),
+                                        line: 0,
+                                        column: None,
+                                    },
+                                    metadata: std::collections::HashMap::new(),
+                                };
+
+                                // Create TypeInfo with OpenAPI schema
+                                let return_type = Some(dc_core::models::TypeInfo {
+                                    base_type: dc_core::models::BaseType::Object,
+                                    schema_ref: Some(schema_ref),
+                                    constraints: Vec::new(),
+                                    optional: false,
+                                });
+
+                                // Update handler node's return_type
+                                match handler_node {
+                                    CallNode::Function {
+                                        return_type: rt, ..
+                                    } => {
+                                        *rt = return_type;
+                                    }
+                                    CallNode::Method {
+                                        return_type: rt, ..
+                                    } => {
+                                        *rt = return_type;
+                                    }
+                                    _ => {
+                                        // Handler is not a function or method, skip enrichment
+                                    }
+                                }
+
                                 if verbose {
                                     eprintln!(
-                                        "[DEBUG] Found response schema {} for route {:?} {}",
+                                        "[DEBUG] Enriched handler with response schema {} for route {:?} {}",
                                         response_schema_name, method, path
                                     );
                                 }
-                                // Schema information is available for contract checking
                             }
                         }
                     }
@@ -250,20 +286,20 @@ impl FastApiCallGraphBuilder {
             let handler_name_opt = endpoint.operation_id.as_ref().map(|op_id| {
                 // Convert operation_id to function name
                 // e.g., "items:read_item" -> "read_item"
-                op_id.split(':').last().unwrap_or(op_id).to_string()
+                op_id.split(':').next_back().unwrap_or(op_id).to_string()
             });
 
             if let Some(handler_name) = handler_name_opt {
-                // Try to find function node by name
+                // Try to find function node by name (exact match only)
                 let handler_node = graph
                     .node_indices()
                     .find(|&node_id| {
                         if let Some(CallNode::Function { name, .. }) = graph.node_weight(node_id) {
-                            name == &handler_name || name.contains(&handler_name)
+                            name == &handler_name
                         } else if let Some(CallNode::Method { name, .. }) =
                             graph.node_weight(node_id)
                         {
-                            name == &handler_name || name.contains(&handler_name)
+                            name == &handler_name
                         } else {
                             false
                         }

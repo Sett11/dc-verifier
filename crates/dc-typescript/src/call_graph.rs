@@ -30,20 +30,73 @@ pub struct TypeScriptCallGraphBuilder {
     /// TypeScript path resolver for handling path mappings
     path_resolver: path_resolver::TypeScriptPathResolver,
     /// OpenAPI schema for linking TypeScript types to Backend
+    /// TODO: Integrate into detect_api_call to link API calls with OpenAPI endpoints
     openapi_schema: Option<OpenAPISchema>,
     /// OpenAPI linker for schema matching
+    /// TODO: Use in detect_api_call to match discovered API calls with OpenAPI endpoints
     openapi_linker: Option<OpenAPILinker>,
 }
 
 impl TypeScriptCallGraphBuilder {
+    /// Determines project root by finding common ancestor of src_paths and searching for marker files
+    fn determine_project_root(src_paths: &[PathBuf]) -> PathBuf {
+        if src_paths.is_empty() {
+            return PathBuf::from(".");
+        }
+
+        // Find common ancestor of all src_paths
+        let mut common_ancestor = src_paths[0].clone();
+        for path in src_paths.iter().skip(1) {
+            common_ancestor = Self::find_common_ancestor(&common_ancestor, path);
+        }
+
+        // Search upward for marker files (package.json or tsconfig.json)
+        let mut current = common_ancestor.clone();
+        loop {
+            // Check for marker files
+            if current.join("package.json").exists() || current.join("tsconfig.json").exists() {
+                return current;
+            }
+
+            // Move up one directory
+            if let Some(parent) = current.parent() {
+                current = parent.to_path_buf();
+            } else {
+                // Reached root, return common ancestor
+                break;
+            }
+        }
+
+        // Fallback to common ancestor or first src_path's parent
+        common_ancestor
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// Finds common ancestor of two paths
+    fn find_common_ancestor(path1: &Path, path2: &Path) -> PathBuf {
+        let components1: Vec<_> = path1.components().collect();
+        let components2: Vec<_> = path2.components().collect();
+
+        let mut common = PathBuf::new();
+        let min_len = components1.len().min(components2.len());
+
+        for i in 0..min_len {
+            if components1[i] == components2[i] {
+                common.push(components1[i]);
+            } else {
+                break;
+            }
+        }
+
+        common
+    }
+
     /// Creates a new builder
     pub fn new(src_paths: Vec<PathBuf>) -> Self {
-        // Determine project root from first src_path
-        let project_root = src_paths
-            .first()
-            .and_then(|p| p.parent())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
+        // Determine project root using helper function
+        let project_root = Self::determine_project_root(&src_paths);
 
         Self {
             graph: CallGraph::new(),
@@ -101,14 +154,14 @@ impl TypeScriptCallGraphBuilder {
             self.find_ts_files(src_path, &mut files)?;
         }
 
-        // 2. Determine project root and update path resolver
-        if let Some(first_file) = files.first() {
-            if let Some(parent) = first_file.parent() {
-                let new_root = parent.to_path_buf();
-                self.project_root = Some(new_root.clone());
-                // Reinitialize path resolver with correct project root
-                self.path_resolver = path_resolver::TypeScriptPathResolver::new(&new_root);
-            }
+        // 2. Determine project root using helper function (only if not already set or if it differs)
+        let discovered_root = Self::determine_project_root(&self.src_paths);
+        if self.project_root.as_ref().is_none()
+            || self.project_root.as_ref() != Some(&discovered_root)
+        {
+            self.project_root = Some(discovered_root.clone());
+            // Reinitialize path resolver with correct project root
+            self.path_resolver = path_resolver::TypeScriptPathResolver::new(&discovered_root);
         }
 
         // 3. Parse and process each file

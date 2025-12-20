@@ -1,6 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// AdditionalProperties can be either a boolean or a schema object
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AdditionalProperties {
+    Bool(bool),
+    Schema(SchemaRef),
+}
+
 /// OpenAPI schema representation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAPISchema {
@@ -25,10 +33,11 @@ pub struct PathItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Operation {
+    #[serde(rename = "operationId")]
     pub operation_id: Option<String>,
     pub summary: Option<String>,
     pub tags: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(rename = "requestBody", default)]
     pub request_body: Option<RequestBody>,
     #[serde(default)]
     pub responses: HashMap<String, Response>,
@@ -93,20 +102,20 @@ pub enum Schema {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectSchema {
-    #[serde(rename = "type")]
-    pub schema_type: Option<String>,
+    #[serde(rename = "type", default = "default_object_type")]
+    pub schema_type: String,
     pub properties: Option<HashMap<String, SchemaRef>>,
     pub required: Option<Vec<String>>,
     #[serde(rename = "additionalProperties")]
-    pub additional_properties: Option<bool>,
+    pub additional_properties: Option<AdditionalProperties>,
     pub title: Option<String>,
     pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArraySchema {
-    #[serde(rename = "type")]
-    pub schema_type: Option<String>,
+    #[serde(rename = "type", default = "default_array_type")]
+    pub schema_type: String,
     pub items: Option<Box<SchemaRef>>,
     pub title: Option<String>,
     pub description: Option<String>,
@@ -114,12 +123,12 @@ pub struct ArraySchema {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrimitiveSchema {
-    #[serde(rename = "type")]
-    pub schema_type: Option<String>,
+    #[serde(rename = "type", default = "default_primitive_type")]
+    pub schema_type: String,
     pub format: Option<String>,
     pub title: Option<String>,
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(rename = "enum", default)]
     pub enum_values: Option<Vec<serde_json::Value>>,
 }
 
@@ -164,4 +173,16 @@ pub struct OpenAPISchemaComponent {
     pub name: String,
     pub schema: Schema,
     pub properties: Vec<(String, String)>, // (property_name, schema_name_or_type)
+}
+
+fn default_object_type() -> String {
+    "object".to_string()
+}
+
+fn default_array_type() -> String {
+    "array".to_string()
+}
+
+fn default_primitive_type() -> String {
+    "string".to_string()
 }
