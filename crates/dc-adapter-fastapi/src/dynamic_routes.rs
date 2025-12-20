@@ -443,8 +443,7 @@ impl DynamicRoutesAnalyzer {
             if self.verbose {
                 eprintln!(
                     "[DEBUG] Created virtual route: {:?} {}",
-                    endpoint.method,
-                    endpoint.path
+                    endpoint.method, endpoint.path
                 );
             }
         }
