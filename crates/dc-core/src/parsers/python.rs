@@ -137,19 +137,70 @@ impl PythonParser {
 
                         // Extract field information
                         let mut fields = Vec::new();
+                        let mut has_from_attributes = false;
                         for body_stmt in &class_def.body {
-                            if let ast::Stmt::AnnAssign(ann_assign) = body_stmt {
-                                if let ast::Expr::Name(name) = ann_assign.target.as_ref() {
-                                    let field_name = name.id.to_string();
-                                    let field_type =
-                                        self.expr_to_string(ann_assign.annotation.as_ref());
-                                    fields.push(format!("{}:{}", field_name, field_type));
+                            match body_stmt {
+                                ast::Stmt::AnnAssign(ann_assign) => {
+                                    if let ast::Expr::Name(name) = ann_assign.target.as_ref() {
+                                        let field_name = name.id.to_string();
+                                        let field_type_expr = ann_assign.annotation.as_ref();
+                                        let field_type = self.expr_to_string(field_type_expr);
+
+                                        // Check if field type is Optional or Union
+                                        let (is_optional, base_type) =
+                                            self.extract_optional_or_union_type(field_type_expr);
+
+                                        // Use base type if Optional/Union was detected
+                                        let final_type = if is_optional {
+                                            format!("Optional[{}]", base_type)
+                                        } else {
+                                            field_type.clone()
+                                        };
+
+                                        // Check if field has Field() default value
+                                        let mut field_info =
+                                            format!("{}:{}", field_name, final_type);
+                                        if let Some(value) = &ann_assign.value {
+                                            if let Some(field_constraints) =
+                                                self.extract_field_constraints(value)
+                                            {
+                                                if !field_constraints.is_empty() {
+                                                    field_info.push_str(&format!(
+                                                        "[{}]",
+                                                        field_constraints
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                        fields.push(field_info);
+                                    }
                                 }
+                                ast::Stmt::Assign(assign_stmt) => {
+                                    // Check for model_config = {"from_attributes": True}
+                                    if let Some(target) = assign_stmt.targets.first() {
+                                        if let ast::Expr::Name(name) = target {
+                                            if name.id.as_str() == "model_config" {
+                                                if let Some(config_dict) =
+                                                    self.extract_model_config(&assign_stmt.value)
+                                                {
+                                                    if config_dict.contains_key("from_attributes") {
+                                                        has_from_attributes = true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
                         }
 
                         if !fields.is_empty() {
                             metadata.insert("fields".to_string(), fields.join(","));
+                        }
+
+                        if has_from_attributes {
+                            metadata.insert("from_attributes".to_string(), "true".to_string());
                         }
 
                         let range = class_def.range();
@@ -727,6 +778,100 @@ impl PythonParser {
             }
         } else {
             response_model.to_string()
+        }
+    }
+
+    /// Extracts field constraints from Field() call
+    /// Example: Field(min_length=1, max_length=100) -> "min_length=1,max_length=100"
+    fn extract_field_constraints(&self, expr: &ast::Expr) -> Option<String> {
+        if let ast::Expr::Call(call_expr) = expr {
+            // Check if it's Field() call
+            if let Some(call_name) = self.call_name(&call_expr.func) {
+                if call_name == "Field" || call_name.ends_with(".Field") {
+                    let mut constraints = Vec::new();
+                    for kw in &call_expr.keywords {
+                        if let Some(arg_name) = &kw.arg {
+                            let value = self.expr_to_string(&kw.value);
+                            constraints.push(format!("{}={}", arg_name.as_str(), value));
+                        }
+                    }
+                    if !constraints.is_empty() {
+                        return Some(constraints.join(","));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Extracts model_config dictionary
+    /// Returns HashMap with config keys and string values
+    fn extract_model_config(
+        &self,
+        expr: &ast::Expr,
+    ) -> Option<std::collections::HashMap<String, String>> {
+        if let ast::Expr::Dict(dict) = expr {
+            let mut config = std::collections::HashMap::new();
+            for (key_expr, value_expr) in dict.keys.iter().zip(dict.values.iter()) {
+                if let Some(key_expr) = key_expr {
+                    let key = self.expr_to_string(key_expr);
+                    let value = self.expr_to_string(value_expr);
+                    config.insert(key, value);
+                }
+            }
+            Some(config)
+        } else {
+            None
+        }
+    }
+
+    /// Extracts Optional or Union type information
+    /// Returns (is_optional, base_type)
+    /// Examples:
+    /// - Optional[str] -> (true, "str")
+    /// - Union[str, None] -> (true, "str")
+    /// - str | None -> (true, "str")
+    fn extract_optional_or_union_type(&self, expr: &ast::Expr) -> (bool, String) {
+        match expr {
+            ast::Expr::Subscript(sub) => {
+                // Check for Optional[T] or Union[T, None]
+                let base = self.expr_to_string(sub.value.as_ref());
+                let slice_str = self.expr_to_string(sub.slice.as_ref());
+
+                if base == "Optional" {
+                    // Optional[T] -> extract T
+                    return (true, slice_str);
+                } else if base == "Union" {
+                    // Union[T, None] or Union[None, T] -> extract T
+                    // Parse slice to find non-None type
+                    if let ast::Expr::Tuple(tuple) = sub.slice.as_ref() {
+                        for elt in &tuple.elts {
+                            let elt_str = self.expr_to_string(elt);
+                            if elt_str != "None" {
+                                return (true, elt_str);
+                            }
+                        }
+                    }
+                }
+                (false, self.expr_to_string(expr))
+            }
+            ast::Expr::BinOp(bin_op) => {
+                // Check for str | None (Python 3.10+ union syntax)
+                // rustpython_parser uses Operator enum
+                use rustpython_parser::ast::Operator;
+                if matches!(bin_op.op, Operator::BitOr) {
+                    let left_str = self.expr_to_string(bin_op.left.as_ref());
+                    let right_str = self.expr_to_string(bin_op.right.as_ref());
+
+                    if left_str == "None" {
+                        return (true, right_str);
+                    } else if right_str == "None" {
+                        return (true, left_str);
+                    }
+                }
+                (false, self.expr_to_string(expr))
+            }
+            _ => (false, self.expr_to_string(expr)),
         }
     }
 }

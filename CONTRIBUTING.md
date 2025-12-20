@@ -113,6 +113,11 @@ To add support for a new language/framework:
    - Handle `max_recursion_depth` from config
    - Add progress bar support for adapter processing
    - Integrate with `DataFlowTracker` and `ChainBuilder`
+   - Support OpenAPI integration if applicable:
+     - Parse `openapi_path` from config (global or adapter-specific)
+     - Use `OpenAPIParser::parse_file()` to load OpenAPI schema
+     - Create `OpenAPILinker` instance and pass to call graph builder
+     - Use `OpenAPILinker` to enhance routes and link schemas
 5. Add the adapter to `dc-cli/src/commands/visualize.rs`:
    - Support graph building with progress bars
    - Generate DOT files for visualization
@@ -128,6 +133,15 @@ To add support for a new language/framework:
 8. Update `dc-cli/src/config.rs`:
    - Add adapter type validation in `Config::validate()`
    - Ensure proper error messages for missing required fields
+   - Support `openapi_path` in adapter configuration (optional field)
+
+**OpenAPI Integration:** If your adapter can benefit from OpenAPI schema integration:
+- Use `OpenAPILinker` from `dc-core::openapi` to link schemas with code artifacts
+- Implement `with_openapi_schema()` method in your call graph builder
+- Use `OpenAPILinker::match_route_to_endpoint()` to match discovered routes with OpenAPI endpoints
+- Use `OpenAPILinker::link_pydantic_to_openapi()` or `link_typescript_to_openapi()` to link schemas
+- Create virtual routes for OpenAPI endpoints not found in code
+- See `dc-adapter-fastapi` and `dc-adapter-typescript` as reference implementations
 
 **Note for TypeScript adapters:** If your adapter uses decorators (like NestJS), you may need to:
 - Extend `TypeScriptParser` to extract decorators from SWC AST

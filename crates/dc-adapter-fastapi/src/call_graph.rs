@@ -1,6 +1,9 @@
+use crate::dynamic_routes::DynamicRoutesAnalyzer;
 use crate::pydantic::PydanticExtractor;
 use anyhow::Result;
-use dc_core::call_graph::{CallGraph, CallGraphBuilder};
+use dc_core::call_graph::{CallGraph, CallGraphBuilder, CallNode, HttpMethod};
+use dc_core::models::{Location, NodeId};
+use dc_core::openapi::{OpenAPILinker, OpenAPIParser, OpenAPISchema};
 use std::path::{Path, PathBuf};
 
 /// Call graph builder for FastAPI application
@@ -8,6 +11,8 @@ pub struct FastApiCallGraphBuilder {
     core_builder: CallGraphBuilder,
     app_path: PathBuf,
     verbose: bool,
+    openapi_schema: Option<OpenAPISchema>,
+    openapi_linker: Option<OpenAPILinker>,
 }
 
 impl FastApiCallGraphBuilder {
@@ -18,6 +23,8 @@ impl FastApiCallGraphBuilder {
             core_builder: CallGraphBuilder::new().with_schema_extractor(extractor),
             app_path,
             verbose: false,
+            openapi_schema: None,
+            openapi_linker: None,
         }
     }
 
@@ -31,6 +38,23 @@ impl FastApiCallGraphBuilder {
     pub fn with_verbose(mut self, verbose: bool) -> Self {
         self.verbose = verbose;
         self.core_builder = self.core_builder.with_verbose(verbose);
+        self
+    }
+
+    /// Sets the OpenAPI schema path
+    /// If provided, the builder will use OpenAPI schema to enhance route detection
+    pub fn with_openapi_schema(mut self, openapi_path: Option<PathBuf>) -> Self {
+        if let Some(path) = openapi_path {
+            if let Ok(schema) = OpenAPIParser::parse_file(&path) {
+                if self.verbose {
+                    eprintln!("[DEBUG] Loaded OpenAPI schema from {:?}", path);
+                }
+                self.openapi_schema = Some(schema.clone());
+                self.openapi_linker = Some(OpenAPILinker::new(schema));
+            } else if self.verbose {
+                eprintln!("[WARN] Failed to parse OpenAPI schema from {:?}", path);
+            }
+        }
         self
     }
 
@@ -58,8 +82,51 @@ impl FastApiCallGraphBuilder {
         let mut core_builder = self.core_builder;
         core_builder.build_from_entry(&entry_point)?;
 
-        // Return built graph
-        Ok(core_builder.into_graph())
+        // Store verbose and openapi_linker before moving self
+        let verbose = self.verbose;
+        let openapi_linker = self.openapi_linker;
+
+        // Analyze dynamic routes (fastapi_users, etc.)
+        let dynamic_analyzer = DynamicRoutesAnalyzer::new(verbose);
+
+        // Get the graph (before dynamic routes processing)
+        let mut graph =
+            if let Ok(dynamic_endpoints) = dynamic_analyzer.analyze_main_file(&entry_point) {
+                if !dynamic_endpoints.is_empty() {
+                    if verbose {
+                        eprintln!(
+                            "[DEBUG] Found {} dynamic endpoints in {:?}",
+                            dynamic_endpoints.len(),
+                            entry_point
+                        );
+                    }
+
+                    // Create virtual route nodes in the graph
+                    let mut graph = core_builder.into_graph();
+                    dynamic_analyzer.create_virtual_routes(
+                        &mut graph,
+                        &dynamic_endpoints,
+                        &entry_point,
+                    );
+                    graph
+                } else {
+                    core_builder.into_graph()
+                }
+            } else {
+                core_builder.into_graph()
+            };
+
+        // Enhance routes with OpenAPI information
+        if let Some(linker) = openapi_linker {
+            if let Err(err) = Self::enhance_routes_with_openapi_static(&linker, &mut graph, verbose)
+            {
+                if verbose {
+                    eprintln!("[WARN] Failed to enhance routes with OpenAPI: {}", err);
+                }
+            }
+        }
+
+        Ok(graph)
     }
 
     /// Finds project root by going up from app_path and searching for project markers
@@ -92,6 +159,162 @@ impl FastApiCallGraphBuilder {
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| app_path.to_path_buf())
+    }
+
+    /// Enhances routes in the graph with OpenAPI information
+    fn enhance_routes_with_openapi_static(
+        linker: &OpenAPILinker,
+        graph: &mut CallGraph,
+        verbose: bool,
+    ) -> Result<()> {
+        // Find all Route nodes in the graph
+        let route_nodes: Vec<(NodeId, String, HttpMethod)> = graph
+            .node_indices()
+            .filter_map(|node_id| {
+                if let Some(CallNode::Route { path, method, .. }) = graph.node_weight(node_id) {
+                    Some((NodeId::from(node_id), path.clone(), *method))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if verbose {
+            eprintln!(
+                "[DEBUG] Found {} route nodes to enhance with OpenAPI",
+                route_nodes.len()
+            );
+        }
+
+        // For each route, find corresponding OpenAPI endpoint and enrich
+        for (node_id, path, method) in &route_nodes {
+            if let Some(endpoint) = linker.match_route_to_endpoint(path, *method) {
+                if verbose {
+                    eprintln!(
+                        "[DEBUG] Matched route {:?} {} to OpenAPI endpoint (operation_id: {:?})",
+                        method, path, endpoint.operation_id
+                    );
+                }
+
+                // Try to enrich handler function with OpenAPI schema information
+                if let Some(CallNode::Route { handler, .. }) = graph.node_weight(node_id.0) {
+                    // Get handler node to enrich its return type with OpenAPI response schema
+                    if let Some(_handler_node) = graph.node_weight(handler.0) {
+                        // If OpenAPI has response schema, we can link it
+                        if let Some(ref response_schema_name) = endpoint.response_schema {
+                            if let Some(_schema) = linker.get_schema(response_schema_name) {
+                                if verbose {
+                                    eprintln!(
+                                        "[DEBUG] Found response schema {} for route {:?} {}",
+                                        response_schema_name, method, path
+                                    );
+                                }
+                                // Schema information is available for contract checking
+                            }
+                        }
+                    }
+                }
+            } else if verbose {
+                eprintln!(
+                    "[DEBUG] Route {:?} {} not found in OpenAPI schema",
+                    method, path
+                );
+            }
+        }
+
+        // Find OpenAPI endpoints not discovered in code and create virtual routes
+        let discovered_routes: Vec<_> = route_nodes
+            .iter()
+            .map(|(_, path, method)| (path.clone(), *method))
+            .collect();
+        let (missing_in_openapi, missing_in_code) = linker.validate_routes(&discovered_routes);
+
+        if verbose {
+            if !missing_in_openapi.is_empty() {
+                eprintln!(
+                    "[DEBUG] {} routes found in code but not in OpenAPI",
+                    missing_in_openapi.len()
+                );
+            }
+            if !missing_in_code.is_empty() {
+                eprintln!(
+                    "[DEBUG] {} endpoints found in OpenAPI but not in code (creating virtual routes)",
+                    missing_in_code.len()
+                );
+            }
+        }
+
+        // Create virtual Route nodes for OpenAPI endpoints not found in code
+        for endpoint in missing_in_code {
+            // Try to find handler by operation_id
+            let handler_name_opt = endpoint.operation_id.as_ref().map(|op_id| {
+                // Convert operation_id to function name
+                // e.g., "items:read_item" -> "read_item"
+                op_id.split(':').last().unwrap_or(op_id).to_string()
+            });
+
+            if let Some(handler_name) = handler_name_opt {
+                // Try to find function node by name
+                let handler_node = graph
+                    .node_indices()
+                    .find(|&node_id| {
+                        if let Some(CallNode::Function { name, .. }) = graph.node_weight(node_id) {
+                            name == &handler_name || name.contains(&handler_name)
+                        } else if let Some(CallNode::Method { name, .. }) =
+                            graph.node_weight(node_id)
+                        {
+                            name == &handler_name || name.contains(&handler_name)
+                        } else {
+                            false
+                        }
+                    })
+                    .map(NodeId::from);
+
+                let method = match endpoint.method.to_lowercase().as_str() {
+                    "get" => HttpMethod::Get,
+                    "post" => HttpMethod::Post,
+                    "put" => HttpMethod::Put,
+                    "patch" => HttpMethod::Patch,
+                    "delete" => HttpMethod::Delete,
+                    "options" => HttpMethod::Options,
+                    "head" => HttpMethod::Head,
+                    _ => continue,
+                };
+
+                // Create placeholder function node if handler not found
+                let handler_node_id = handler_node.unwrap_or_else(|| {
+                    let placeholder_id = graph.add_node(CallNode::Function {
+                        name: handler_name.clone(),
+                        file: PathBuf::from("openapi-virtual"),
+                        line: 0,
+                        parameters: vec![],
+                        return_type: None,
+                    });
+                    NodeId::from(placeholder_id)
+                });
+
+                // Create virtual route node
+                let _route_node_id = graph.add_node(CallNode::Route {
+                    path: endpoint.path.clone(),
+                    method,
+                    handler: handler_node_id,
+                    location: Location {
+                        file: "openapi-virtual".to_string(),
+                        line: 0,
+                        column: None,
+                    },
+                });
+
+                if verbose {
+                    eprintln!(
+                        "[DEBUG] Created virtual route {:?} {} from OpenAPI (from_openapi: true)",
+                        method, endpoint.path
+                    );
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

@@ -2,10 +2,12 @@ use dc_core::models::DataChain;
 use pyo3::prelude::*;
 
 mod call_graph;
+mod dynamic_routes;
 mod extractor;
 mod pydantic;
 
 pub use call_graph::*;
+pub use dynamic_routes::*;
 pub use extractor::*;
 pub use pydantic::*;
 

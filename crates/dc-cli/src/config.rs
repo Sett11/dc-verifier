@@ -14,6 +14,8 @@ pub struct Config {
     pub output: OutputConfig,
     /// Maximum recursion depth for graph building (None = unlimited)
     pub max_recursion_depth: Option<usize>,
+    /// Global OpenAPI schema path (optional, can be overridden per adapter)
+    pub openapi_path: Option<String>,
 }
 
 /// Adapter configuration
@@ -23,6 +25,8 @@ pub struct AdapterConfig {
     pub adapter_type: String,
     pub app_path: Option<String>,
     pub src_paths: Option<Vec<String>>,
+    /// OpenAPI schema path (optional, overrides global openapi_path if set)
+    pub openapi_path: Option<String>,
 }
 
 /// Rules configuration
@@ -153,6 +157,38 @@ impl Config {
         // Validate output path
         if self.output.path.is_empty() {
             anyhow::bail!("output.path cannot be empty");
+        }
+
+        // Validate global openapi_path if specified
+        if let Some(ref openapi_path) = self.openapi_path {
+            let path = Path::new(openapi_path);
+            if !path.exists() {
+                anyhow::bail!("Global openapi_path does not exist: {}", openapi_path);
+            }
+            if !path.is_file() {
+                anyhow::bail!("Global openapi_path must be a file: {}", openapi_path);
+            }
+        }
+
+        // Validate adapter openapi_path if specified
+        for (idx, adapter) in self.adapters.iter().enumerate() {
+            if let Some(ref openapi_path) = adapter.openapi_path {
+                let path = Path::new(openapi_path);
+                if !path.exists() {
+                    anyhow::bail!(
+                        "Adapter {}: openapi_path does not exist: {}",
+                        idx,
+                        openapi_path
+                    );
+                }
+                if !path.is_file() {
+                    anyhow::bail!(
+                        "Adapter {}: openapi_path must be a file: {}",
+                        idx,
+                        openapi_path
+                    );
+                }
+            }
         }
 
         Ok(())

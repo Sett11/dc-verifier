@@ -1,6 +1,8 @@
+use crate::path_resolver;
 use anyhow::{Context, Result};
 use dc_core::call_graph::{CallEdge, CallGraph, CallNode, HttpMethod};
 use dc_core::models::{Location, NodeId};
+use dc_core::openapi::{OpenAPILinker, OpenAPIParser, OpenAPISchema};
 use dc_core::parsers::{Call, TypeScriptParser};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -25,11 +27,24 @@ pub struct TypeScriptCallGraphBuilder {
     sdk_function_cache: HashMap<String, Option<ApiCallInfo>>,
     /// Map of imported functions to their source files (function_name -> source_file_path)
     imported_functions: HashMap<String, PathBuf>,
+    /// TypeScript path resolver for handling path mappings
+    path_resolver: path_resolver::TypeScriptPathResolver,
+    /// OpenAPI schema for linking TypeScript types to Backend
+    openapi_schema: Option<OpenAPISchema>,
+    /// OpenAPI linker for schema matching
+    openapi_linker: Option<OpenAPILinker>,
 }
 
 impl TypeScriptCallGraphBuilder {
     /// Creates a new builder
     pub fn new(src_paths: Vec<PathBuf>) -> Self {
+        // Determine project root from first src_path
+        let project_root = src_paths
+            .first()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+
         Self {
             graph: CallGraph::new(),
             src_paths,
@@ -37,12 +52,15 @@ impl TypeScriptCallGraphBuilder {
             processed_files: HashSet::new(),
             module_nodes: HashMap::new(),
             function_nodes: HashMap::new(),
-            project_root: None,
+            project_root: Some(project_root.clone()),
             max_depth: None,
             current_depth: 0,
             verbose: false,
             sdk_function_cache: HashMap::new(),
             imported_functions: HashMap::new(),
+            path_resolver: path_resolver::TypeScriptPathResolver::new(&project_root),
+            openapi_schema: None,
+            openapi_linker: None,
         }
     }
 
@@ -58,6 +76,23 @@ impl TypeScriptCallGraphBuilder {
         self
     }
 
+    /// Sets the OpenAPI schema path
+    /// If provided, the builder will use OpenAPI schema to link TypeScript API calls with Backend routes
+    pub fn with_openapi_schema(mut self, openapi_path: Option<PathBuf>) -> Self {
+        if let Some(path) = openapi_path {
+            if let Ok(schema) = OpenAPIParser::parse_file(&path) {
+                if self.verbose {
+                    eprintln!("[DEBUG] Loaded OpenAPI schema from {:?}", path);
+                }
+                self.openapi_schema = Some(schema.clone());
+                self.openapi_linker = Some(OpenAPILinker::new(schema));
+            } else if self.verbose {
+                eprintln!("[WARN] Failed to parse OpenAPI schema from {:?}", path);
+            }
+        }
+        self
+    }
+
     /// Builds graph for TypeScript project
     pub fn build_graph(mut self) -> Result<CallGraph> {
         // 1. Find all .ts/.tsx files in src_paths
@@ -66,10 +101,13 @@ impl TypeScriptCallGraphBuilder {
             self.find_ts_files(src_path, &mut files)?;
         }
 
-        // 2. Determine project root
+        // 2. Determine project root and update path resolver
         if let Some(first_file) = files.first() {
             if let Some(parent) = first_file.parent() {
-                self.project_root = Some(parent.to_path_buf());
+                let new_root = parent.to_path_buf();
+                self.project_root = Some(new_root.clone());
+                // Reinitialize path resolver with correct project root
+                self.path_resolver = path_resolver::TypeScriptPathResolver::new(&new_root);
             }
         }
 
@@ -148,6 +186,7 @@ impl TypeScriptCallGraphBuilder {
 
             // Also check for export * from patterns in the current file
             // and track exported functions from SDK files
+            // Continue even if import resolution fails
             self.track_export_all_sdk_functions(&module, &normalized, 0);
 
             // Extract calls
@@ -361,7 +400,7 @@ impl TypeScriptCallGraphBuilder {
 
     /// Checks if a file is an SDK file (openapi-client, api-client, sdk, etc.)
     fn is_sdk_file(&self, file_path: &Path) -> bool {
-        let path_str = file_path.to_string_lossy().to_lowercase();
+        let _path_str = file_path.to_string_lossy().to_lowercase();
         let file_name = file_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -373,12 +412,18 @@ impl TypeScriptCallGraphBuilder {
             .unwrap_or("")
             .to_lowercase();
 
-        // Check for explicit SDK patterns in path
-        if path_str.contains("openapi-client")
-            || path_str.contains("api-client")
-            || path_str.contains("/sdk/")
-            || path_str.contains("\\sdk\\")
-        {
+        // Explicit check for sdk.gen.ts (most common pattern)
+        if file_name == "sdk.gen.ts" || file_name == "sdk.gen.tsx" {
+            return true;
+        }
+
+        // Check for explicit SDK patterns in path (segment-aware)
+        // Check if any path segment is exactly "openapi-client" or "api-client"
+        let has_openapi_client = file_path.components().any(|c| {
+            let segment = c.as_os_str().to_string_lossy().to_lowercase();
+            segment == "openapi-client" || segment == "api-client"
+        });
+        if has_openapi_client {
             return true;
         }
 
@@ -1375,6 +1420,48 @@ impl TypeScriptCallGraphBuilder {
             with_ext.set_extension(ext);
             if with_ext.exists() {
                 return Ok(with_ext);
+            }
+        }
+
+        // Try adding .gen.ts/.gen.tsx extensions for generated files
+        // This handles imports like "./client" -> "./client.gen.ts"
+        for gen_ext in &["gen.ts", "gen.tsx"] {
+            let mut with_gen_ext = candidate.clone();
+            // Get the file stem and add .gen extension
+            if let Some(stem) = candidate.file_stem().and_then(|s| s.to_str()) {
+                with_gen_ext.set_file_name(format!("{}.{}", stem, gen_ext));
+                if with_gen_ext.exists() {
+                    if self.verbose {
+                        eprintln!(
+                            "[DEBUG] Resolved import '{}' to generated file {:?}",
+                            import_path, with_gen_ext
+                        );
+                    }
+                    return Ok(with_gen_ext);
+                }
+            }
+        }
+
+        // Try index files in directory
+        if candidate.is_dir() || candidate.extension().is_none() {
+            for index_file in &["index.ts", "index.tsx", "index.js", "index.jsx"] {
+                let index_path = candidate.join(index_file);
+                if index_path.exists() {
+                    return Ok(index_path);
+                }
+            }
+            // Also try index.gen.ts/index.gen.tsx
+            for gen_index in &["index.gen.ts", "index.gen.tsx"] {
+                let gen_index_path = candidate.join(gen_index);
+                if gen_index_path.exists() {
+                    if self.verbose {
+                        eprintln!(
+                            "[DEBUG] Resolved import '{}' to generated index file {:?}",
+                            import_path, gen_index_path
+                        );
+                    }
+                    return Ok(gen_index_path);
+                }
             }
         }
 

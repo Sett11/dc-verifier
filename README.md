@@ -23,7 +23,14 @@ dc-verifier analyzes data flow through a call graph:
 
 ### Language and Framework Support
 - ✅ **Python/FastAPI** - Python code parsing, FastAPI routes extraction, Pydantic models
+  - Dynamic routes detection (fastapi_users and other route generators)
+  - `response_model` extraction from decorators
+  - Pydantic model import resolution (`app.schemas.*`)
+  - Pydantic transformations tracking (`model_validate()`, `model_dump()`)
 - ✅ **TypeScript** - TypeScript code parsing, extraction of imports, calls, functions, classes, methods, Zod schemas, interfaces and type aliases
+  - TypeScript path mappings support (`@/app/...` from `tsconfig.json`)
+  - Re-export support (`export * from`)
+  - Optional chaining (`?.`) and nullish coalescing (`??`) handling
 - ✅ **NestJS** - TypeScript backend framework support with decorator-based route extraction, DTO class validation, and parameter extraction
 
 ### Frontend Library Support
@@ -36,7 +43,22 @@ dc-verifier supports detection of API calls from various frontend libraries:
 - ✅ **tRPC** - `.useQuery()`, `.useMutation()` chain patterns
 - ✅ **Apollo Client** - `useQuery`, `useMutation` with GraphQL queries
 - ✅ **Next.js Server Actions** - `actions.*()` function calls
+- ✅ **OpenAPI SDK Clients** - `client.get()`, `client.post()`, `client.delete()`, `client.patch()`, `client.put()` from generated OpenAPI clients
+  - SDK file detection (`sdk.gen.ts`, `openapi-client`, `api-client`)
+  - SDK function tracking through re-exports
+  - Automatic API call extraction from SDK function bodies
 - ✅ **Generic patterns** - `fetch()`, `axios.*()`, `api.*()`, `client.*()`
+
+### OpenAPI Integration
+
+dc-verifier supports OpenAPI schema integration for enhanced route detection and schema linking between Frontend and Backend.
+
+- ✅ **Schema Parsing** - Automatic parsing of OpenAPI JSON schemas
+- ✅ **Route Enhancement** - Improved route detection by matching discovered routes with OpenAPI endpoints
+- ✅ **Virtual Routes** - Automatic creation of virtual route nodes for OpenAPI endpoints not found in code
+- ✅ **Schema Linking** - Links TypeScript types and Pydantic models through OpenAPI schema components
+- ✅ **SDK Client Support** - Detects API calls from OpenAPI-generated SDK clients
+- ✅ **Global and Per-Adapter Configuration** - Support for global `openapi_path` and adapter-specific overrides
 
 ### Code Analysis
 - ✅ **Call graph building** - automatic graph construction for Python and TypeScript projects
@@ -148,6 +170,10 @@ project_name = "my-project"
 # Useful for large projects to avoid infinite recursion
 # max_recursion_depth = 100
 
+# Global OpenAPI schema path (optional, applies to all adapters)
+# Can be overridden per adapter
+# openapi_path = "openapi.json"
+
 [output]
 format = "markdown"  # or "json"
 path = "dc-verifier-report.md"
@@ -155,10 +181,14 @@ path = "dc-verifier-report.md"
 [[adapters]]
 type = "fastapi"
 app_path = "app/main.py"
+# Optional: override global openapi_path for this adapter
+# openapi_path = "backend/openapi.json"
 
 [[adapters]]
 type = "typescript"
 src_paths = ["frontend/src", "shared"]
+# Uses global openapi_path or can override
+# openapi_path = "frontend/openapi.json"
 
 [rules]
 type_mismatch = "critical"      # Type mismatch checking
@@ -174,7 +204,15 @@ unnormalized_data = "warning"   # Data normalization checking
 [[adapters]]
 type = "fastapi"
 app_path = "app/main.py"  # Path to FastAPI application file
+# Optional: OpenAPI schema path (overrides global openapi_path if set)
+# openapi_path = "openapi.json"
 ```
+
+The FastAPI adapter supports:
+- Dynamic routes detection (fastapi_users and other route generators)
+- `response_model` extraction from decorators
+- Pydantic model import resolution
+- Pydantic transformations tracking
 
 #### TypeScript Adapter
 
@@ -182,7 +220,15 @@ app_path = "app/main.py"  # Path to FastAPI application file
 [[adapters]]
 type = "typescript"
 src_paths = ["src", "lib"]  # Directories with TypeScript files
+# Optional: OpenAPI schema path (overrides global openapi_path if set)
+# openapi_path = "openapi.json"
 ```
+
+The TypeScript adapter supports:
+- TypeScript path mappings from `tsconfig.json` (`@/app/...`)
+- Re-export handling (`export * from`)
+- OpenAPI SDK client call detection
+- Multiple frontend library patterns
 
 #### NestJS Adapter
 
@@ -190,6 +236,8 @@ src_paths = ["src", "lib"]  # Directories with TypeScript files
 [[adapters]]
 type = "nestjs"
 src_paths = ["src"]  # Directories with NestJS TypeScript files
+# Optional: OpenAPI schema path (overrides global openapi_path if set)
+# openapi_path = "openapi.json"
 ```
 
 The NestJS adapter supports:
@@ -212,6 +260,68 @@ unnormalized_data = "warning"  # Data normalization checking (critical/warning/i
 ```
 
 These rules are used to determine severity in contracts and affect the final statistics in reports.
+
+## OpenAPI Integration
+
+dc-verifier supports OpenAPI schema integration for enhanced route detection and schema linking between Frontend and Backend.
+
+### Features
+
+- **Schema Parsing**: Automatic parsing of OpenAPI JSON schemas
+- **Route Enhancement**: Improved route detection by matching discovered routes with OpenAPI endpoints
+- **Virtual Routes**: Automatic creation of virtual route nodes for OpenAPI endpoints not found in code
+- **Schema Linking**: Links TypeScript types and Pydantic models through OpenAPI schema components
+- **SDK Client Support**: Detects API calls from OpenAPI-generated SDK clients
+
+### Configuration
+
+OpenAPI schema can be specified globally or per-adapter:
+
+```toml
+# Global OpenAPI schema (applies to all adapters)
+openapi_path = "openapi.json"
+
+[[adapters]]
+type = "fastapi"
+app_path = "backend/app/main.py"
+# Can override for specific adapter
+# openapi_path = "backend/openapi.json"
+
+[[adapters]]
+type = "typescript"
+src_paths = ["frontend/src"]
+# Uses global openapi_path or can override
+# openapi_path = "frontend/openapi.json"
+```
+
+### How It Works
+
+1. **Schema Parsing**: OpenAPI schema is parsed and endpoints/schemas are extracted
+2. **Route Matching**: Discovered routes are matched against OpenAPI endpoints
+3. **Enhancement**: Route information is enriched with OpenAPI schema data
+4. **Virtual Routes**: Missing OpenAPI endpoints are created as virtual routes
+5. **Schema Linking**: Frontend TypeScript types and Backend Pydantic models are linked via OpenAPI schemas
+
+### Architecture
+
+```mermaid
+graph TD
+    A[Config: openapi_path] --> B[OpenAPIParser]
+    B --> C[OpenAPISchema]
+    C --> D[OpenAPILinker]
+    D --> E[Extract Endpoints]
+    D --> F[Extract Schemas]
+    E --> G[Match Routes]
+    F --> H[Link Schemas]
+    G --> I[Enhance Routes]
+    G --> J[Create Virtual Routes]
+    H --> K[Link TypeScript Types]
+    H --> L[Link Pydantic Models]
+    I --> M[FastAPI Adapter]
+    J --> M
+    K --> N[TypeScript Adapter]
+    L --> M
+```
 
 ## Usage Examples
 
@@ -297,6 +407,9 @@ project_name = "fullstack-app"
 # Recursion depth limit for large projects
 max_recursion_depth = 150
 
+# Global OpenAPI schema (applies to all adapters)
+openapi_path = "openapi.json"
+
 [output]
 format = "json"  # Use JSON format for CI/CD integration
 path = "dc-verifier-report.json"
@@ -304,16 +417,54 @@ path = "dc-verifier-report.json"
 [[adapters]]
 type = "fastapi"
 app_path = "backend/app/main.py"
+# Can override openapi_path for specific adapter
+# openapi_path = "backend/openapi.json"
 
 [[adapters]]
 type = "typescript"
 src_paths = ["frontend/src"]
+# Uses global openapi_path or can override
 
 [rules]
 type_mismatch = "critical"
 missing_field = "warning"
 unnormalized_data = "info"
 ```
+
+## Advanced Features
+
+### Dynamic Routes Detection
+
+dc-verifier automatically detects dynamically generated routes in FastAPI applications:
+
+- **fastapi_users** - Detects routes generated by `fastapi_users` library
+- **Route Generators** - Supports custom route generators that use `app.include_router()`
+- **Virtual Route Nodes** - Creates route nodes for dynamically generated endpoints
+
+### OpenAPI Schema Linking
+
+OpenAPI schemas serve as a bridge between Frontend and Backend:
+
+- **Type Matching** - Matches TypeScript types with Pydantic models through OpenAPI schema components
+- **Schema Validation** - Validates that discovered routes match OpenAPI endpoints
+- **Missing Endpoint Detection** - Identifies routes in code that are not in OpenAPI and vice versa
+
+### SDK Function Tracking
+
+For OpenAPI-generated SDK clients:
+
+- **Function Detection** - Tracks SDK functions through re-exports (`export * from`)
+- **API Call Extraction** - Analyzes SDK function bodies to extract API calls (`client.get()`, `client.post()`, etc.)
+- **SDK File Recognition** - Automatically recognizes SDK files (`sdk.gen.ts`, `openapi-client`, `api-client`)
+
+### Import Resolution
+
+Enhanced import resolution for better code analysis:
+
+- **TypeScript Path Mappings** - Resolves `@/app/...` imports using `tsconfig.json` paths
+- **Re-export Handling** - Tracks functions and types through `export * from` statements
+- **Python Import Resolution** - Resolves relative and absolute imports for Pydantic models
+- **Recursion Depth Control** - Prevents infinite loops in complex re-export chains
 
 ## What is Checked
 
@@ -323,6 +474,8 @@ dc-verifier checks the following aspects of data chains:
 2. **Required fields** - verifies that all required fields are present
 3. **Data normalization** - checks validation (email, URL, patterns)
 4. **Decorator validation** - verifies NestJS decorators and DTO class validation rules
+5. **OpenAPI compliance** - verifies that discovered routes match OpenAPI specification
+6. **Schema linking** - verifies linking between TypeScript types and Pydantic models through OpenAPI
 
 ## Report Formats
 
@@ -376,10 +529,20 @@ The project is ready for use. Current readiness: **~98-100%**.
 - ✅ JSON report format (option `--format json`, `JsonReporter`)
 - ✅ Improved error handling (typed errors via `thiserror`)
 - ✅ Unit and integration tests (all tests pass)
+- ✅ OpenAPI schema parsing and linking (`OpenAPIParser`, `OpenAPILinker`)
+- ✅ OpenAPI SDK client call detection (`client.get()`, `client.post()`, etc.)
+- ✅ Dynamic FastAPI routes detection (fastapi_users and other generators)
+- ✅ TypeScript path mappings support (`@/app/...` from `tsconfig.json`)
+- ✅ Pydantic model transformations tracking (`model_validate()`, `model_dump()`)
+- ✅ Enhanced import resolution for TypeScript and Python
+- ✅ Virtual route creation from OpenAPI endpoints
+- ✅ SDK function tracking through re-exports
+- ✅ FastAPI `response_model` extraction from decorators
 
 ### Planned
 
-- ⚠️ Documentation improvements (usage examples)
+- ⚠️ Additional OpenAPI generators support (openapi-typescript-codegen, swagger-typescript-api)
+- ⚠️ GraphQL schema support
 
 ## License
 

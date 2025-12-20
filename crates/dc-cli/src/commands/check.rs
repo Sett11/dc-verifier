@@ -7,6 +7,7 @@ use dc_adapter_nestjs::NestJSCallGraphBuilder;
 use dc_core::analyzers::{ChainBuilder, ContractChecker};
 use dc_core::data_flow::DataFlowTracker;
 use dc_core::models::Severity;
+use dc_core::openapi::OpenAPIParser;
 use dc_typescript::TypeScriptCallGraphBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
@@ -16,7 +17,19 @@ pub fn execute_check(config_path: &str, format: ReportFormat, verbose: bool) -> 
     // 1. Load configuration
     let config = Config::load(config_path)?;
 
-    // 2. Initialize adapters and build graphs
+    // 2. Parse global OpenAPI schema if specified
+    let _global_openapi = config.openapi_path.as_ref().and_then(|path| {
+        OpenAPIParser::parse_file(std::path::Path::new(path))
+            .map_err(|e| {
+                eprintln!(
+                    "[WARN] Failed to parse global OpenAPI schema from {}: {}",
+                    path, e
+                );
+            })
+            .ok()
+    });
+
+    // 3. Initialize adapters and build graphs
     let mut all_chains = Vec::new();
 
     // Create progress bar
@@ -35,6 +48,13 @@ pub fn execute_check(config_path: &str, format: ReportFormat, verbose: bool) -> 
             idx + 1,
             adapter_config.adapter_type
         ));
+        // Determine OpenAPI path for this adapter
+        let openapi_path = adapter_config
+            .openapi_path
+            .as_ref()
+            .or(config.openapi_path.as_ref())
+            .map(|p| PathBuf::from(p));
+
         match adapter_config.adapter_type.as_str() {
             "fastapi" => {
                 let app_path = adapter_config
@@ -44,7 +64,9 @@ pub fn execute_check(config_path: &str, format: ReportFormat, verbose: bool) -> 
                 let app_path = PathBuf::from(app_path);
 
                 // Build call graph for FastAPI
-                let mut builder = FastApiCallGraphBuilder::new(app_path).with_verbose(verbose);
+                let mut builder = FastApiCallGraphBuilder::new(app_path)
+                    .with_verbose(verbose)
+                    .with_openapi_schema(openapi_path);
                 // Set max recursion depth from config
                 if let Some(max_depth) = config.max_recursion_depth {
                     builder = builder.with_max_depth(Some(max_depth));
@@ -69,7 +91,8 @@ pub fn execute_check(config_path: &str, format: ReportFormat, verbose: bool) -> 
                 // Build call graph for TypeScript
                 let builder = TypeScriptCallGraphBuilder::new(src_paths)
                     .with_max_depth(config.max_recursion_depth)
-                    .with_verbose(verbose);
+                    .with_verbose(verbose)
+                    .with_openapi_schema(openapi_path);
                 let graph = builder.build_graph()?;
 
                 // Create DataFlowTracker and ChainBuilder

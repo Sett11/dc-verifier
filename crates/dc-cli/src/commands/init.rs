@@ -10,18 +10,25 @@ entry_point = "backend/api/main.py"
 # Maximum recursion depth for graph building (optional, None = unlimited)
 # max_recursion_depth = 100
 
+# OpenAPI schema path (optional, can be overridden per adapter)
+# openapi_path = "local-shared-data/openapi.json"
+
 [[adapters]]
 type = "fastapi"
 app_path = "backend/api/main.py"
+# openapi_path = "custom-openapi.json"  # Optional override
 
 [[adapters]]
 type = "typescript"
 src_paths = ["frontend/src"]
+# Uses global openapi_path or can override
+# openapi_path = "frontend/openapi.json"
 
 # Example NestJS adapter configuration:
 # [[adapters]]
 # type = "nestjs"
 # src_paths = ["backend/src"]
+# # openapi_path = "backend/openapi.json"  # Optional override
 
 [rules]
 type_mismatch = "critical"

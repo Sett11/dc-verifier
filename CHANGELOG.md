@@ -65,6 +65,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `ChainType` enum: `Full`, `FrontendInternal`, `BackendInternal`
   - Automatic chain type detection based on node types
   - Statistics by chain type in reports
+- **OpenAPI Integration** - Full support for OpenAPI schemas to link Frontend and Backend
+  - Global and per-adapter `openapi_path` configuration
+  - `OpenAPIParser` for parsing OpenAPI JSON schemas
+  - `OpenAPILinker` for linking schemas with code artifacts
+  - Automatic route enhancement through OpenAPI matching
+  - Virtual route creation for OpenAPI endpoints not found in code
+  - Schema linking between TypeScript types and Pydantic models via OpenAPI
+- **OpenAPI SDK Client Support** - Detection of API calls from generated OpenAPI clients
+  - Support for `client.get()`, `client.post()`, `client.delete()`, `client.patch()`, `client.put()`
+  - SDK file detection (`sdk.gen.ts`, `openapi-client`, `api-client`)
+  - SDK function tracking through re-exports
+  - Analysis of SDK functions to extract URL and HTTP methods
+- **Dynamic FastAPI Routes** - Detection of dynamically generated routes
+  - Support for fastapi_users and other route generators
+  - `DynamicRoutesAnalyzer` for analyzing dynamic routes
+  - Automatic creation of virtual route nodes
+- **Enhanced TypeScript Support**
+  - TypeScript path mappings from `tsconfig.json` (`@/app/...`)
+  - Improved re-export handling (`export * from`)
+  - Support for optional chaining (`?.`) and nullish coalescing (`??`)
+- **Enhanced FastAPI Support**
+  - `response_model` extraction from decorators
+  - Pydantic model import resolution (`app.schemas.*`)
+  - Pydantic transformations tracking (`model_validate()`, `model_dump()`)
 
 ### Changed
 - **All code comments** translated to English (main public functions and doc comments)
@@ -72,14 +96,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **JsonReporter** now fully integrated into CLI (was previously marked as dead code)
 - **TypeScript call graph builder** now supports multiple frontend libraries
 - **Report format** enhanced with severity levels and chain type statistics
-- **Configuration** now supports `nestjs` adapter type
-- **README.md** updated with new features (progress bars, JSON reports, max_recursion_depth, thiserror, NestJS adapter, frontend libraries)
+- **Configuration** now supports `nestjs` adapter type and `openapi_path` (global and per-adapter)
+- **FastAPI adapter** - Improved route detection through OpenAPI integration
+- **TypeScript adapter** - Improved API call detection through SDK functions
+- **README.md** updated with new features (progress bars, JSON reports, max_recursion_depth, thiserror, NestJS adapter, frontend libraries, OpenAPI integration)
 - **AUDIT_REPORT.md** updated with latest implementation details and test statistics
 
 ### Fixed
 - Removed outdated TODO comments
 - Fixed temporary value lifetime issues in progress bar messages
 - Synchronized documentation across README, AUDIT_REPORT, and CHANGELOG
+- Fixed all compiler warnings (unused imports, unused variables, dead code)
+- Improved `Box<Expr>` dereferencing handling in Python parser
 
 ## [0.1.0] - 2025-11-26
 

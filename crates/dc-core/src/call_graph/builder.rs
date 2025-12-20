@@ -253,6 +253,16 @@ impl CallGraphBuilder {
         call: &Call,
         current_file: &Path,
     ) -> Result<NodeId> {
+        // Check if this is a Pydantic transformation method
+        if let Some(transform_info) = self.detect_pydantic_transformation(call) {
+            return self.process_pydantic_transformation(
+                caller,
+                call,
+                current_file,
+                transform_info,
+            );
+        }
+
         let Some(callee_node) = self.find_function_node(&call.name, current_file) else {
             // Function not found, return caller without creating edge
             return Ok(caller);
@@ -1215,7 +1225,7 @@ impl CallGraphBuilder {
 
             Some(SchemaReference {
                 name: "Object".to_string(),
-                schema_type: SchemaType::JsonSchema,
+                schema_type: SchemaType::JsonSchema, // Keep as JsonSchema for missing schemas
                 location: Location {
                     file: _file_path.to_string_lossy().to_string(),
                     line: _line,
@@ -1699,29 +1709,80 @@ impl CallGraphBuilder {
     ) -> Result<()> {
         let normalized_file = Self::normalize_path(current_file);
 
-        // Check if we have import information for this file
-        let Some(imports_map) = self.file_imports.get(&normalized_file) else {
-            return Ok(()); // No imports recorded for this file
+        // Strategy 1: Check if we have import information for this file
+        let module_paths_to_try: Vec<String> = {
+            if let Some(imports_map) = self.file_imports.get(&normalized_file) {
+                let mut paths = Vec::new();
+
+                // Find the module path for this schema name
+                if let Some(module_path_str) = imports_map.get(schema_name) {
+                    paths.push(module_path_str.clone());
+                }
+
+                // Strategy 2: Try to find module by partial match (e.g., "schemas" for "app.schemas")
+                // If schema_name is "ItemRead" and we have "schemas" -> "app.schemas" in imports,
+                // try resolving "app.schemas" and searching for "ItemRead" there
+                for (imported_name, module_path_str) in imports_map.iter() {
+                    // If imported name matches a common module pattern (schemas, models, etc.)
+                    if (imported_name == "schemas" || imported_name == "models")
+                        && !paths.contains(module_path_str)
+                    {
+                        paths.push(module_path_str.clone());
+                    }
+                }
+                paths
+            } else {
+                Vec::new()
+            }
         };
 
-        // Find the module path for this schema name
-        let Some(module_path_str) = imports_map.get(schema_name) else {
-            return Ok(()); // Schema not found in imports
-        };
+        // Try resolving from collected module paths
+        for module_path_str in &module_paths_to_try {
+            if let Ok(module_file) = self.resolve_import_path(module_path_str, current_file) {
+                // Extract and cache Pydantic models from the imported module
+                if let Err(err) = self.extract_and_cache_pydantic_models(&module_file) {
+                    if self.verbose {
+                        eprintln!(
+                            "[DEBUG] Failed to extract models from {:?}: {}",
+                            module_file, err
+                        );
+                    }
+                } else {
+                    // Check if the schema is now in cache
+                    if self.pydantic_models.contains_key(schema_name) {
+                        if self.verbose {
+                            eprintln!(
+                                "[DEBUG] Successfully resolved schema '{}' from module {:?}",
+                                schema_name, module_file
+                            );
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
 
-        // Resolve the module path to a file path
-        let module_file = self.resolve_import_path(module_path_str, current_file)?;
-
-        // Extract and cache Pydantic models from the imported module
-        // This will populate pydantic_models cache with the schema
-        self.extract_and_cache_pydantic_models(&module_file)?;
-
-        // Check if the schema is now in cache
-        if self.pydantic_models.contains_key(schema_name) && self.verbose {
-            eprintln!(
-                "[DEBUG] Successfully resolved schema '{}' from module {:?}",
-                schema_name, module_file
-            );
+        // Strategy 3: Fallback - search all processed files for the schema by name
+        // This handles cases where imports weren't properly tracked
+        // Collect file paths first to avoid borrowing issues
+        let processed_files: Vec<PathBuf> = self.processed_files.iter().cloned().collect();
+        for file_path in &processed_files {
+            if let Err(err) = self.extract_and_cache_pydantic_models(file_path) {
+                if self.verbose {
+                    eprintln!(
+                        "[DEBUG] Failed to extract models from {:?} during fallback search: {}",
+                        file_path, err
+                    );
+                }
+            } else if self.pydantic_models.contains_key(schema_name) {
+                if self.verbose {
+                    eprintln!(
+                        "[DEBUG] Successfully resolved schema '{}' via fallback search in {:?}",
+                        schema_name, file_path
+                    );
+                }
+                return Ok(());
+            }
         }
 
         Ok(())
@@ -1806,5 +1867,134 @@ impl CallGraphBuilder {
             ast::Expr::Call(call_expr) => self.get_decorator_name(&call_expr.func),
             _ => None,
         }
+    }
+
+    /// Detects if a call is a Pydantic transformation method
+    /// Returns transformation type and model name if detected
+    fn detect_pydantic_transformation(&self, call: &Call) -> Option<(String, String)> {
+        // Check for method calls like model.model_validate(), model.model_dump(), etc.
+        // Pattern: <model_name>.<method>(...)
+        if call.name.contains('.') {
+            let parts: Vec<&str> = call.name.split('.').collect();
+            if parts.len() == 2 {
+                let model_name = parts[0].to_string();
+                let method = parts[1];
+
+                // List of Pydantic transformation methods
+                let transformation_methods = [
+                    "model_validate",
+                    "model_validate_json",
+                    "model_dump",
+                    "model_dump_json",
+                    "model_serialize",
+                    "from_orm",
+                    "dict",
+                    "json",
+                    "parse_obj",
+                    "parse_raw",
+                ];
+
+                if transformation_methods.contains(&method) {
+                    return Some((method.to_string(), model_name));
+                }
+            }
+        }
+
+        // Also check for direct method calls (e.g., BaseModel.model_validate(...))
+        if call.name.ends_with(".model_validate")
+            || call.name.ends_with(".model_dump")
+            || call.name.ends_with(".from_orm")
+            || call.name.ends_with(".dict")
+            || call.name.ends_with(".json")
+        {
+            let parts: Vec<&str> = call.name.rsplitn(2, '.').collect();
+            if parts.len() == 2 {
+                let method = parts[0];
+                let model_name = parts[1];
+                return Some((method.to_string(), model_name.to_string()));
+            }
+        }
+
+        None
+    }
+
+    /// Processes a Pydantic transformation call
+    /// Creates a special edge in the call graph to track data transformations
+    fn process_pydantic_transformation(
+        &mut self,
+        caller: NodeId,
+        call: &Call,
+        current_file: &Path,
+        transform_info: (String, String),
+    ) -> Result<NodeId> {
+        let (method, model_name) = transform_info;
+
+        // Try to find the model in our cache
+        let model_schema = self.pydantic_models.get(&model_name).cloned();
+
+        // Create return type from model name
+        let return_type = if let Some(schema) = &model_schema {
+            Some(TypeInfo {
+                base_type: BaseType::Object,
+                schema_ref: Some(schema.clone()),
+                constraints: Vec::new(),
+                optional: false,
+            })
+        } else {
+            Some(TypeInfo {
+                base_type: BaseType::Object,
+                schema_ref: Some(SchemaReference {
+                    name: model_name.clone(),
+                    schema_type: SchemaType::Pydantic,
+                    location: call.location.clone(),
+                    metadata: HashMap::new(),
+                }),
+                constraints: Vec::new(),
+                optional: false,
+            })
+        };
+
+        // Create a virtual transformation node
+        let transform_node_id = NodeId::from(self.graph.add_node(CallNode::Function {
+            name: format!("{}.{}", model_name, method),
+            file: current_file.to_path_buf(),
+            line: call.location.line,
+            parameters: vec![],
+            return_type,
+        }));
+
+        // Add edge with transformation metadata
+        let argument_mapping = call
+            .arguments
+            .iter()
+            .enumerate()
+            .map(|(idx, arg)| {
+                let key = arg
+                    .parameter_name
+                    .clone()
+                    .unwrap_or_else(|| format!("arg{}", idx));
+                (key, arg.value.clone())
+            })
+            .collect();
+
+        self.graph.add_edge(
+            *caller,
+            *transform_node_id,
+            CallEdge::Call {
+                caller,
+                callee: transform_node_id,
+                argument_mapping,
+                location: call.location.clone(),
+            },
+        );
+
+        if self.verbose {
+            eprintln!(
+                "[DEBUG] Detected Pydantic transformation: {}.{} (model: {})",
+                model_name, method, model_name
+            );
+        }
+
+        Ok(transform_node_id)
     }
 }
