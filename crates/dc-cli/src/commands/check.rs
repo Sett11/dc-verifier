@@ -13,13 +13,16 @@ use dc_core::models::Severity;
 use dc_core::openapi::{OpenAPILinker, OpenAPIParser};
 use dc_typescript::TypeScriptCallGraphBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{error, warn};
 
 /// Executes data chain verification
 pub fn execute_check(config_path: &str, format: ReportFormat, verbose: bool) -> Result<()> {
     // 1. Load configuration
-    let mut config = Config::load(config_path)?;
+    // Determine base path from config file location
+    let config_file_path = Path::new(config_path);
+    let base_path = config_file_path.parent();
+    let mut config = Config::load(config_path, base_path)?;
 
     // 2. Auto-fill missing OpenAPI paths
     config.auto_fill_openapi(config_path);
@@ -49,6 +52,8 @@ pub fn execute_check(config_path: &str, format: ReportFormat, verbose: bool) -> 
             .progress_chars("#>-"),
     );
     pb.set_message("Building graphs...");
+
+    let mut skipped_adapters = Vec::new();
 
     for (idx, adapter_config) in config.adapters.iter().enumerate() {
         pb.set_message(format!(
@@ -171,13 +176,23 @@ pub fn execute_check(config_path: &str, format: ReportFormat, verbose: bool) -> 
                 all_chains.extend(chains);
             }
             _ => {
+                let adapter_type = adapter_config.adapter_type.clone();
                 error!(
-                    adapter_type = %adapter_config.adapter_type,
+                    adapter_type = %adapter_type,
                     "Unknown adapter type"
                 );
+                skipped_adapters.push(adapter_type);
             }
         }
         pb.inc(1);
+    }
+
+    if !skipped_adapters.is_empty() {
+        warn!(
+            count = skipped_adapters.len(),
+            adapters = ?skipped_adapters,
+            "Some adapters were skipped due to unknown type"
+        );
     }
 
     pb.set_message("Finding chains...");

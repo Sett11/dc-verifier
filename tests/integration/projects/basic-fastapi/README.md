@@ -1,28 +1,27 @@
 # Basic FastAPI Example
 
-Этот проект используется как эталонный пример для интеграционных тестов `dc-verifier`.
+This project is used as a reference example for `dc-verifier` integration tests.
 
-## Стек
+## Stack
 
 - FastAPI
-- Pydantic моделей для схем запросов/ответов
-- SQLAlchemy ORM-модель `Item`
+- Pydantic models for request/response schemas
+- SQLAlchemy ORM model `Item`
 
-## Структура
+## Structure
 
 ```text
 backend/
-  database.py   # SQLAlchemy Base + модель Item
-  schemas.py    # Pydantic-схемы ItemBase / ItemCreate / ItemRead
-  main.py       # FastAPI-приложение и CRUD-роуты
+  database.py   # SQLAlchemy Base + Item model
+  schemas.py    # Pydantic schemas ItemBase / ItemCreate / ItemRead
+  main.py       # FastAPI application and CRUD routes
 dc-verifier.toml
 ```
 
-## Цели для dc-verifier
+## Goals for dc-verifier
 
-- Обнаружение Pydantic-схем `ItemCreate` и `ItemRead`.
-- Обнаружение ORM-модели `Item` и связи Pydantic ↔ ORM через `from_attributes`.
-- Построение цепочек данных для CRUD-роутов `/items/`.
-
+- Detect Pydantic schemas `ItemCreate` and `ItemRead`.
+- Detect ORM model `Item` and Pydantic ↔ ORM connection via `from_attributes`.
+- Build data chains for CRUD routes `/items/`.
 
 

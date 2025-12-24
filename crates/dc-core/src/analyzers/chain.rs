@@ -610,13 +610,10 @@ impl<'a> ChainBuilder<'a> {
         let mut contracts = self.build_contracts(links);
 
         if links.len() >= 2 && !mismatches.is_empty() {
-            let zod_link = &links[0];
-            let pydantic_link = &links[links.len() - 1];
-
-            if let Some(contract) = contracts
-                .iter_mut()
-                .find(|c| c.from_link_id == zod_link.id && c.to_link_id == pydantic_link.id)
-            {
+            // Attach mismatches to the last contract (which connects to the Pydantic sink)
+            // Note: build_contracts creates contracts between consecutive links only,
+            // so in a Zod → API Route → Pydantic chain, the last contract is API Route → Pydantic
+            if let Some(contract) = contracts.last_mut() {
                 // Raise severity for this contract
                 contract.severity = Severity::Warning;
 

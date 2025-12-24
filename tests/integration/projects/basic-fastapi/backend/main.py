@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from typing import List
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -24,21 +25,28 @@ def get_db():
         db.close()
 
 
-app = FastAPI(title="Basic FastAPI Example", version="0.1.0")
-
-
-@app.on_event("startup")
-def on_startup() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
     Base.metadata.create_all(bind=engine)
+    yield
+    # Shutdown (if needed)
+
+
+app = FastAPI(title="Basic FastAPI Example", version="0.1.0", lifespan=lifespan)
 
 
 @app.post("/items/", response_model=ItemRead)
 def create_item(item: ItemCreate, db: Session = Depends(get_db)) -> ItemRead:
-    db_item = Item(title=item.title, description=item.description)
-    db.add(db_item)
-    db.commit()
-    db.refresh(db_item)
-    return ItemRead.model_validate(db_item)
+    try:
+        db_item = Item(title=item.title, description=item.description)
+        db.add(db_item)
+        db.commit()
+        db.refresh(db_item)
+        return ItemRead.model_validate(db_item)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to create item: {str(e)}")
 
 
 @app.get("/items/", response_model=List[ItemRead])

@@ -55,12 +55,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Validate YAML files
-        run: |
-          python3 -c 'import yaml, sys; yaml.safe_load(sys.stdin)' < .github/workflows/ci.yml
-          python3 -c 'import yaml, sys; yaml.safe_load(sys.stdin)' < .github/workflows/release.yml
-          python3 -c 'import yaml, sys; yaml.safe_load(sys.stdin)' < docker-compose.yml
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 

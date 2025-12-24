@@ -479,8 +479,8 @@ impl SchemaParser {
             // Otherwise, try to extract the base type
             if let Some(start) = type_lower.find('[') {
                 if let Some(end) = type_lower.rfind(']') {
-                    let inner = &type_lower[start + 1..end].trim();
-                    return Self::base_type_from_string(inner);
+                    let inner = type_lower[start + 1..end].trim();
+                    return Self::base_type_from_string(&inner);
                 }
             }
         }

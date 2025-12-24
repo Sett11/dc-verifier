@@ -25,7 +25,7 @@ impl TypeScriptPathResolver {
 
         // Try to find and parse tsconfig.json
         if let Err(err) = resolver.load_tsconfig(project_root) {
-            // Silently fail if tsconfig.json is not found or invalid
+            // Log a warning if tsconfig.json is not found or invalid
             // This is expected for projects without TypeScript configuration
             warn!(
                 error = %err,

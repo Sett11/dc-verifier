@@ -249,26 +249,53 @@ impl OpenAPILinker {
             let pydantic_fields = Self::extract_pydantic_fields(pydantic_schema_ref);
 
             if !pydantic_fields.is_empty() {
-                let mut best_match: Option<(&OpenAPISchemaComponent, f64)> = None;
-                let threshold = 0.7; // Minimum similarity score (70%)
+                // Extract threshold to named constant
+                const FIELD_MATCH_THRESHOLD: f64 = 0.7;
+                
+                let mut candidates: Vec<(&OpenAPISchemaComponent, f64)> = Vec::new();
+                let threshold = FIELD_MATCH_THRESHOLD;
 
                 // Try all OpenAPI schemas
                 for openapi_schema in self.schemas.values() {
                     let score = self.match_schemas_by_fields(&pydantic_fields, openapi_schema);
 
                     if score >= threshold {
-                        if let Some((_, best_score)) = best_match {
-                            if score > best_score {
-                                best_match = Some((openapi_schema, score));
-                            }
-                        } else {
-                            best_match = Some((openapi_schema, score));
-                        }
+                        candidates.push((openapi_schema, score));
                     }
                 }
 
-                if let Some((schema, _)) = best_match {
-                    return Some(schema);
+                if !candidates.is_empty() {
+                    // Find max score
+                    let max_score = candidates.iter().map(|(_, score)| *score).fold(0.0, f64::max);
+                    
+                    // Collect all schemas with max score
+                    let max_candidates: Vec<_> = candidates
+                        .into_iter()
+                        .filter(|(_, score)| (*score - max_score).abs() < f64::EPSILON)
+                        .collect();
+                    
+                    if max_candidates.len() > 1 {
+                        // Tie-breaker: prefer lexicographically closest name
+                        let pydantic_name_lower = pydantic_name.to_lowercase();
+                        if let Some((schema, _)) = max_candidates
+                            .iter()
+                            .min_by_key(|(schema, _)| {
+                                // Calculate "distance" as lexicographic comparison
+                                schema.name.to_lowercase().cmp(&pydantic_name_lower)
+                            })
+                        {
+                            tracing::debug!(
+                                pydantic_name = %pydantic_name,
+                                chosen_schema = %schema.name,
+                                score = max_score,
+                                "Tie-breaker applied for schema matching"
+                            );
+                            return Some(*schema);
+                        }
+                        return None;
+                    } else {
+                        return max_candidates.first().map(|(schema, _)| *schema);
+                    }
                 }
             }
         }

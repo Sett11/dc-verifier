@@ -973,13 +973,17 @@ impl CallGraphBuilder {
                                 .or_else(|| base_str.rsplit("::").next())
                                 .unwrap_or(&base_str);
 
-                            // Common SQLAlchemy base class names
+                            // Keep specific checks for "Base", "declarative_base", "SQLAlchemyBase", "db.Model"
                             if last_segment == "Base"
                                 || last_segment == "declarative_base"
                                 || base_str.contains("SQLAlchemyBase")
                                 || base_str.contains("db.Model")
-                                || base_str.contains("Model")
                             {
+                                return true;
+                            }
+                            
+                            // For "Model" check, require SQLAlchemy-like attributes
+                            if base_str.ends_with("Model") || last_segment == "Model" {
                                 // Additional check: look for Column attributes in class body
                                 for body_stmt in &class_def.body {
                                     if let ast::Stmt::AnnAssign(ann_assign) = body_stmt {
@@ -995,8 +999,8 @@ impl CallGraphBuilder {
                                         }
                                     }
                                 }
-                                // If it inherits from Base/Model, it's likely SQLAlchemy
-                                return true;
+                                // If "Model" but no SQLAlchemy attributes found, don't return true
+                                return false;
                             }
                         }
                     }
@@ -1712,17 +1716,28 @@ impl CallGraphBuilder {
 
     /// Extracts inner type from Annotated[T, Body()] string representation
     /// Annotated[ItemCreate, Body()] -> ItemCreate
+    /// Handles nested types like Annotated[List[str], Body()] correctly
     fn extract_annotated_inner_type(&self, annotated_str: &str) -> String {
         // Format: Annotated[TypeName, CallExpr]
         if let Some(start) = annotated_str.find('[') {
-            if let Some(comma) = annotated_str[start..].find(',') {
-                let inner = &annotated_str[start + 1..start + comma];
-                return inner.trim().to_string();
-            }
-            // If no comma, try to extract everything before first ']'
-            if let Some(end) = annotated_str[start..].find(']') {
-                let inner = &annotated_str[start + 1..start + end];
-                return inner.trim().to_string();
+            let inner = &annotated_str[start + 1..];
+            // Find the comma at bracket depth 0
+            let mut depth = 0;
+            for (i, ch) in inner.char_indices() {
+                match ch {
+                    '[' => depth += 1,
+                    ']' => {
+                        if depth == 0 {
+                            // No comma found, return everything
+                            return inner[..i].trim().to_string();
+                        }
+                        depth -= 1;
+                    }
+                    ',' if depth == 0 => {
+                        return inner[..i].trim().to_string();
+                    }
+                    _ => {}
+                }
             }
         }
         String::new()
@@ -1763,10 +1778,13 @@ impl CallGraphBuilder {
             "current_user",
             "user",
         ];
-        if service_types
-            .iter()
-            .any(|&st| param.name.contains(st) || param.name == st)
-        {
+        // Check for exact match or word boundary match
+        if service_types.iter().any(|&st| {
+            param.name == st 
+                || param.name.starts_with(&format!("{}_", st))
+                || param.name.ends_with(&format!("_{}", st))
+                || param.name.contains(&format!("_{}_", st))
+        }) {
             return false;
         }
 

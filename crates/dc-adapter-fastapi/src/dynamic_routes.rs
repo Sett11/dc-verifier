@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
+use crate::utils::parse_http_method;
+
 /// Configuration for dynamic route generators
 /// This mirrors the structure in dc-cli/src/config.rs
 #[derive(Debug, Deserialize, Clone)]
@@ -523,7 +525,7 @@ impl DynamicRoutesAnalyzer {
         let mut endpoints = Vec::new();
 
         for endpoint_config in &config.endpoints {
-            let method = self.parse_http_method(&endpoint_config.method);
+            let method = parse_http_method(&endpoint_config.method);
             endpoints.push(DynamicEndpoint {
                 path: endpoint_config.path.clone(),
                 method,
@@ -538,20 +540,6 @@ impl DynamicRoutesAnalyzer {
             method_name: config.method.clone(),
             endpoints,
             schema_params: config.schema_params.clone(),
-        }
-    }
-
-    /// Parses HTTP method string to HttpMethod enum
-    fn parse_http_method(&self, method_str: &str) -> HttpMethod {
-        match method_str.to_uppercase().as_str() {
-            "GET" => HttpMethod::Get,
-            "POST" => HttpMethod::Post,
-            "PUT" => HttpMethod::Put,
-            "PATCH" => HttpMethod::Patch,
-            "DELETE" => HttpMethod::Delete,
-            "HEAD" => HttpMethod::Head,
-            "OPTIONS" => HttpMethod::Options,
-            _ => HttpMethod::Get, // Default fallback
         }
     }
 
@@ -787,21 +775,6 @@ impl FastAPIUsersRouterGenerator {
             _ => String::new(),
         }
     }
-
-    /// Parses HTTP method string to HttpMethod enum
-    #[allow(dead_code)]
-    fn parse_http_method(&self, method_str: &str) -> HttpMethod {
-        match method_str.to_uppercase().as_str() {
-            "GET" => HttpMethod::Get,
-            "POST" => HttpMethod::Post,
-            "PUT" => HttpMethod::Put,
-            "PATCH" => HttpMethod::Patch,
-            "DELETE" => HttpMethod::Delete,
-            "HEAD" => HttpMethod::Head,
-            "OPTIONS" => HttpMethod::Options,
-            _ => HttpMethod::Get, // Default fallback
-        }
-    }
 }
 
 impl RouterGenerator for FastAPIUsersRouterGenerator {
@@ -814,9 +787,9 @@ impl RouterGenerator for FastAPIUsersRouterGenerator {
             let method_name = attr.attr.as_str();
             let base_name = self.expr_to_string(attr.value.as_ref());
 
-            base_name.contains("fastapi_users")
-                || base_name.contains("fastapi")
-                || (method_name.starts_with("get_") && method_name.ends_with("_router"))
+            // More specific matching: require both fastapi_users module AND specific method pattern
+            (base_name == "fastapi_users" || base_name.ends_with(".fastapi_users"))
+                && (method_name.starts_with("get_") && method_name.ends_with("_router"))
         } else {
             false
         }

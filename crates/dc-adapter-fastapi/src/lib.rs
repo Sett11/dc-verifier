@@ -5,6 +5,7 @@ mod call_graph;
 mod dynamic_routes;
 mod extractor;
 mod pydantic;
+mod utils;
 
 pub use call_graph::*;
 pub use dynamic_routes::*;

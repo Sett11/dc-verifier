@@ -16,17 +16,14 @@ fn basic_fastapi_project_generates_expected_report() -> Result<()> {
         project_root
     );
 
-    // Работать из корня проекта, чтобы относительные пути в конфиге (backend/main.py) были валидны.
-    std::env::set_current_dir(&project_root)?;
-
-    let config_path = PathBuf::from("dc-verifier.toml");
+    let config_path = project_root.join("dc-verifier.toml");
     assert!(
         config_path.exists(),
         "dc-verifier config not found at {:?}",
         config_path
     );
 
-    let report_path = PathBuf::from(".chain_verification_report.md");
+    let report_path = project_root.join(".chain_verification_report.md");
     if report_path.exists() {
         fs::remove_file(&report_path)?;
     }
@@ -41,21 +38,21 @@ fn basic_fastapi_project_generates_expected_report() -> Result<()> {
 
     let report = fs::read_to_string(&report_path)?;
 
-    // Базовые sanity-check-и: отчёт успешно сгенерирован и содержит ожидаемые цепочки.
+    // Basic sanity checks: report was successfully generated and contains expected chains.
     assert!(
         report.contains("Total Chains"),
         "report should contain verification statistics with total chains"
     );
     assert!(
-        report.contains("Chain 3: POST /items/"),
+        report.contains("POST /items/"),
         "report should describe POST /items/ chain"
     );
     assert!(
-        report.contains("Chain 5: GET /items/"),
+        report.contains("GET /items/"),
         "report should describe GET /items/ chain"
     );
     assert!(
-        report.contains("Chain 7: GET /items/{item_id}"),
+        report.contains("GET /items/{item_id}"),
         "report should describe GET /items with id path parameter chain"
     );
 

@@ -8,12 +8,14 @@ use dc_core::call_graph::{CallEdge, CallGraph, CallNode};
 use dc_typescript::TypeScriptCallGraphBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::error;
 
 /// Visualizes call graphs (optional function)
 pub fn execute_visualize(config_path: &str) -> Result<()> {
-    let config = Config::load(config_path)?;
+    let config_file_path = Path::new(config_path);
+    let base_path = config_file_path.parent();
+    let config = Config::load(config_path, base_path)?;
 
     // Build graphs for all adapters
     let mut all_graphs = Vec::new();
@@ -170,10 +172,19 @@ fn generate_dot(graph: &CallGraph, graph_name: &str) -> Result<String> {
             ) {
                 let edge_label = format_edge_label(edge);
                 let escaped_label = escape_dot_string(&edge_label);
-                dot.push_str(&format!(
-                    "  {} -> {} [label=\"{}\"];\n",
-                    source_id, target_id, escaped_label
-                ));
+                
+                // Apply style attributes for DataFlow edges
+                if matches!(edge, CallEdge::DataFlow { .. }) {
+                    dot.push_str(&format!(
+                        "  {} -> {} [label=\"{}\", style=dashed, color=purple];\n",
+                        source_id, target_id, escaped_label
+                    ));
+                } else {
+                    dot.push_str(&format!(
+                        "  {} -> {} [label=\"{}\"];\n",
+                        source_id, target_id, escaped_label
+                    ));
+                }
             }
         }
     }
@@ -224,17 +235,9 @@ fn format_edge_label(edge: &CallEdge) -> String {
         CallEdge::DataFlow {
             from_schema,
             to_schema,
-            transformation,
             ..
         } => {
-            let transform_str = transformation
-                .as_ref()
-                .map(|t| format!(" ({:?})", t))
-                .unwrap_or_default();
-            format!(
-                "{} → {} [label=\"{}{}\", style=dashed, color=purple]",
-                from_schema.name, to_schema.name, "DataFlow", transform_str
-            )
+            format!("{} → {} [{}]", from_schema.name, to_schema.name, "DataFlow")
         }
         CallEdge::Import { import_path, .. } => {
             format!("import: {}", import_path)

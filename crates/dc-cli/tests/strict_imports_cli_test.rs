@@ -48,15 +48,12 @@ fn non_strict_mode_allows_missing_external_imports() -> Result<()> {
     let project = create_temp_project(&[("app/main.py", "import fastapi\n")]);
     write_config(project.path(), Some(false));
 
-    // Работать из корня временного проекта, чтобы относительные пути были валидны.
-    std::env::set_current_dir(project.path())?;
-
     let config_path = project.path().join("dc-verifier.toml");
     let result = execute_check(config_path.to_str().unwrap(), ReportFormat::Json, false);
 
     if let Err(err) = &result {
         let msg = err.to_string();
-        // В нестрогом режиме мы допускаем сбой анализа, но он не должен помечаться как [STRICT IMPORTS].
+        // In non-strict mode, we allow analysis failures, but they should not be marked as [STRICT IMPORTS].
         assert!(
             !msg.contains("[STRICT IMPORTS]"),
             "in non-strict mode, errors must not be marked as [STRICT IMPORTS], got: {msg}"
@@ -69,9 +66,6 @@ fn non_strict_mode_allows_missing_external_imports() -> Result<()> {
 fn strict_mode_fails_on_missing_external_imports() -> Result<()> {
     let project = create_temp_project(&[("app/main.py", "import fastapi\n")]);
     write_config(project.path(), Some(true));
-
-    // Работать из корня временного проекта, чтобы относительные пути были валидны.
-    std::env::set_current_dir(project.path())?;
 
     let config_path = project.path().join("dc-verifier.toml");
     let result = execute_check(config_path.to_str().unwrap(), ReportFormat::Json, false);

@@ -25,7 +25,13 @@ impl FileWriter {
     pub fn new(path: PathBuf) -> Self {
         // Create parent directories if they don't exist
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                tracing::warn!(
+                    parent = ?parent,
+                    error = %err,
+                    "Failed to create log directory, file operations may fail"
+                );
+            }
         }
         Self { path }
     }
@@ -35,11 +41,26 @@ impl<'a> MakeWriter<'a> for FileWriter {
     type Writer = Box<dyn Write + Send + Sync + 'a>;
 
     fn make_writer(&'a self) -> Self::Writer {
-        let file = OpenOptions::new()
+        // Attempt to create parent directory before opening
+        if let Some(parent) = self.path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        
+        match OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
-            .expect("Failed to open log file");
-        Box::new(std::io::BufWriter::new(file))
+        {
+            Ok(file) => Box::new(std::io::BufWriter::new(file)),
+            Err(err) => {
+                // Fallback to stderr writer on error
+                tracing::error!(
+                    path = ?self.path,
+                    error = %err,
+                    "Failed to open log file, falling back to stderr"
+                );
+                Box::new(std::io::BufWriter::new(std::io::stderr()))
+            }
+        }
     }
 }

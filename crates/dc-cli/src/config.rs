@@ -88,11 +88,26 @@ pub struct EndpointConfig {
 
 impl Config {
     /// Loads configuration from a file
-    pub fn load(path: &str) -> Result<Self> {
-        let content = fs::read_to_string(Path::new(path))
+    /// 
+    /// # Arguments
+    /// * `path` - Path to the config file (can be absolute or relative)
+    /// * `base_path` - Optional base path for resolving relative paths in config.
+    ///                 If None, uses the directory of the config file as base.
+    pub fn load(path: &str, base_path: Option<&Path>) -> Result<Self> {
+        let config_path = Path::new(path);
+        let content = fs::read_to_string(config_path)
             .with_context(|| format!("Failed to read config file: {}", path))?;
-        let config: Config = toml::from_str(&content)
+        let mut config: Config = toml::from_str(&content)
             .with_context(|| format!("Failed to parse config file: {}", path))?;
+        
+        // Determine base path: use provided base_path or config file directory
+        let base = base_path.unwrap_or_else(|| {
+            config_path.parent().unwrap_or_else(|| Path::new("."))
+        });
+        
+        // Resolve relative paths in config
+        config.resolve_relative_paths(base)?;
+        
         config.validate()?;
         Ok(config)
     }
@@ -217,6 +232,96 @@ impl Config {
         Ok(())
     }
 
+    /// Resolves all relative paths in the config relative to the base path
+    fn resolve_relative_paths(&mut self, base: &Path) -> Result<()> {
+        // Resolve entry_point if present
+        if let Some(ref entry_point) = self.entry_point {
+            if !Path::new(entry_point).is_absolute() {
+                let joined = base.join(entry_point);
+                let resolved = if joined.exists() {
+                    joined.canonicalize()
+                        .with_context(|| format!("Failed to resolve entry_point: {}", entry_point))?
+                } else {
+                    joined
+                };
+                self.entry_point = Some(resolved.to_string_lossy().to_string());
+            }
+        }
+        
+        // Resolve global openapi_path if present
+        if let Some(ref openapi_path) = self.openapi_path {
+            if !Path::new(openapi_path).is_absolute() {
+                let joined = base.join(openapi_path);
+                let resolved = if joined.exists() {
+                    joined.canonicalize()
+                        .with_context(|| format!("Failed to resolve openapi_path: {}", openapi_path))?
+                } else {
+                    joined
+                };
+                self.openapi_path = Some(resolved.to_string_lossy().to_string());
+            }
+        }
+        
+        // Resolve adapter-specific paths
+        for adapter in &mut self.adapters {
+            // Resolve app_path for FastAPI
+            if let Some(ref app_path) = adapter.app_path {
+                if !Path::new(app_path).is_absolute() {
+                    let joined = base.join(app_path);
+                    let resolved = if joined.exists() {
+                        joined.canonicalize()
+                            .with_context(|| format!("Failed to resolve app_path: {}", app_path))?
+                    } else {
+                        joined
+                    };
+                    adapter.app_path = Some(resolved.to_string_lossy().to_string());
+                }
+            }
+            
+            // Resolve src_paths for TypeScript/NestJS
+            if let Some(ref src_paths) = adapter.src_paths {
+                let mut resolved_paths = Vec::new();
+                for src_path in src_paths {
+                    if Path::new(src_path).is_absolute() {
+                        resolved_paths.push(src_path.clone());
+                    } else {
+                        let joined = base.join(src_path);
+                        let resolved = if joined.exists() {
+                            joined.canonicalize()
+                                .with_context(|| format!("Failed to resolve src_path: {}", src_path))?
+                        } else {
+                            joined
+                        };
+                        resolved_paths.push(resolved.to_string_lossy().to_string());
+                    }
+                }
+                adapter.src_paths = Some(resolved_paths);
+            }
+            
+            // Resolve adapter-specific openapi_path
+            if let Some(ref openapi_path) = adapter.openapi_path {
+                if !Path::new(openapi_path).is_absolute() {
+                    let joined = base.join(openapi_path);
+                    let resolved = if joined.exists() {
+                        joined.canonicalize()
+                            .with_context(|| format!("Failed to resolve adapter openapi_path: {}", openapi_path))?
+                    } else {
+                        joined
+                    };
+                    adapter.openapi_path = Some(resolved.to_string_lossy().to_string());
+                }
+            }
+        }
+        
+        // Resolve output path
+        if !Path::new(&self.output.path).is_absolute() {
+            let resolved = base.join(&self.output.path);
+            self.output.path = resolved.to_string_lossy().to_string();
+        }
+        
+        Ok(())
+    }
+
     /// Validates that a path exists and is a readable file
     fn validate_openapi_path(path_str: &str, context: &str) -> Result<()> {
         let path = Path::new(path_str);
@@ -291,18 +396,21 @@ impl Config {
 
     /// Auto-fills missing openapi_path fields by searching the project
     pub fn auto_fill_openapi(&mut self, config_file_path: &str) {
+        // Call auto_find_openapi exactly once and cache the result
+        let found_path = Self::auto_find_openapi(config_file_path);
+        
         // Only search if global openapi_path is not set
         if self.openapi_path.is_none() {
-            if let Some(found_path) = Self::auto_find_openapi(config_file_path) {
-                self.openapi_path = Some(found_path);
+            if let Some(ref path) = found_path {
+                self.openapi_path = Some(path.clone());
             }
         }
 
         // Auto-fill adapter-specific openapi_path if not set
         for adapter in &mut self.adapters {
-            if adapter.openapi_path.is_none() && self.openapi_path.is_none() {
-                if let Some(found_path) = Self::auto_find_openapi(config_file_path) {
-                    adapter.openapi_path = Some(found_path);
+            if adapter.openapi_path.is_none() {
+                if let Some(ref path) = found_path {
+                    adapter.openapi_path = Some(path.clone());
                 }
             }
         }

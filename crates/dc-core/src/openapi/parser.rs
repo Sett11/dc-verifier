@@ -196,22 +196,27 @@ impl OpenAPIParser {
 
         if let Some(components) = &schema.components {
             if let Some(schema_map) = &components.schemas {
+                // Reuse a single visited HashSet for both property extraction and reference resolution
+                let mut visited = std::collections::HashSet::new();
+                
                 for (name, schema_ref) in schema_map {
-                    let mut visited = std::collections::HashSet::new();
                     let properties =
                         Self::extract_schema_properties(schema_ref, schema, &mut visited);
 
-                    // Handle both inline and reference schemas
-                    let mut resolve_visited = std::collections::HashSet::new();
                     let resolved_schema = match schema_ref {
                         SchemaRef::Ref(reference) => {
-                            // Resolve the reference
+                            // Resolve the reference using the same visited set
                             if let Some(resolved) =
-                                Self::resolve_ref(schema, &reference.ref_path, &mut resolve_visited)
+                                Self::resolve_ref(schema, &reference.ref_path, &mut visited)
                             {
                                 resolved.schema
                             } else {
-                                // If resolution fails, skip this schema
+                                // Log warning instead of silently skipping
+                                tracing::warn!(
+                                    schema_name = %name,
+                                    ref_path = %reference.ref_path,
+                                    "Failed to resolve schema reference, skipping schema"
+                                );
                                 continue;
                             }
                         }

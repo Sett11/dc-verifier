@@ -20,7 +20,15 @@ fn is_external_dependency(module_name: &str, project_root: &Path) -> bool {
                 if line.is_empty() || line.starts_with('#') {
                     continue;
                 }
-                if line.starts_with(module_name) || line.starts_with(&format!("{}-", module_name)) {
+                // Check for exact package name match with proper boundaries
+                // Match: module_name, module_name==, module_name>=, module_name[, etc.
+                if line == module_name 
+                    || line.starts_with(&format!("{}=", module_name))
+                    || line.starts_with(&format!("{}>", module_name))
+                    || line.starts_with(&format!("{}<", module_name))
+                    || line.starts_with(&format!("{}[", module_name))
+                    || line.starts_with(&format!("{} ", module_name))
+                {
                     return true;
                 }
             }
@@ -170,11 +178,13 @@ impl PythonParser {
         import_path: &str,
         project_root: &Path,
     ) -> Result<Option<PathBuf>, ImportError> {
+        // Use the original path as string if canonicalization fails
         let key = (
             import_path.to_string(),
             project_root
                 .canonicalize()
                 .ok()
+                .or_else(|| Some(project_root.to_path_buf()))
                 .and_then(|p| p.to_str().map(|s| s.to_string())),
         );
 
@@ -182,7 +192,8 @@ impl PythonParser {
             return Ok(cached.clone());
         }
 
-        let result = self.resolve_import_safe(import_path, Path::new(""), project_root)?;
+        // Pass project_root as current_file since the parameter is unused
+        let result = self.resolve_import_safe(import_path, project_root, project_root)?;
         // Cache only successful resolution (Some) and None; errors are propagated as-is.
         self.import_cache.insert(key, result.clone());
         Ok(result)
@@ -965,8 +976,18 @@ impl PythonParser {
     /// - Optional[ItemRead] -> ItemRead
     /// - dict[str, ItemRead] -> ItemRead (extracts value type)
     /// - Page[Optional[ItemRead]] -> ItemRead (nested generic)
+    pub fn extract_inner_type_recursive(&self, type_str: &str) -> String {
+        self.extract_inner_type_recursive_impl(type_str, 0)
+    }
+
     #[allow(clippy::only_used_in_recursion)]
-    fn extract_inner_type_recursive(&self, type_str: &str) -> String {
+    fn extract_inner_type_recursive_impl(&self, type_str: &str, depth: usize) -> String {
+        const MAX_DEPTH: usize = 20;
+        
+        if depth > MAX_DEPTH {
+            return type_str.trim().to_string();
+        }
+        
         // Remove whitespace
         let trimmed = type_str.trim();
 
@@ -987,22 +1008,22 @@ impl PythonParser {
                     if base_type == "dict" || base_type == "Dict" {
                         // Find comma separating key and value types
                         if let Some(comma_pos) = inner_trimmed.find(',') {
-                            let value_type = &inner_trimmed[comma_pos + 1..].trim();
+                            let value_type = inner_trimmed[comma_pos + 1..].trim();
                             // Recursively extract from value type
                             if value_type.contains('[') {
-                                return self.extract_inner_type_recursive(value_type);
+                                return self.extract_inner_type_recursive_impl(value_type, depth + 1);
                             }
                             return value_type.to_string();
                         }
                         // If no comma, treat as single type
-                        return self.extract_inner_type_recursive(inner_trimmed);
+                        return self.extract_inner_type_recursive_impl(inner_trimmed, depth + 1);
                     }
 
                     // Handle list[T], List[T] - extract T
                     if base_type == "list" || base_type == "List" {
                         // Recursively extract from inner type
                         if inner_trimmed.contains('[') {
-                            return self.extract_inner_type_recursive(inner_trimmed);
+                            return self.extract_inner_type_recursive_impl(inner_trimmed, depth + 1);
                         }
                         return inner_trimmed.to_string();
                     }
@@ -1011,7 +1032,7 @@ impl PythonParser {
                     if base_type == "Optional" {
                         // Recursively extract from inner type
                         if inner_trimmed.contains('[') {
-                            return self.extract_inner_type_recursive(inner_trimmed);
+                            return self.extract_inner_type_recursive_impl(inner_trimmed, depth + 1);
                         }
                         return inner_trimmed.to_string();
                     }
@@ -1025,7 +1046,7 @@ impl PythonParser {
                             if part_trimmed != "None" && !part_trimmed.is_empty() {
                                 // Recursively extract from this type
                                 if part_trimmed.contains('[') {
-                                    return self.extract_inner_type_recursive(part_trimmed);
+                                    return self.extract_inner_type_recursive_impl(part_trimmed, depth + 1);
                                 }
                                 return part_trimmed.to_string();
                             }
@@ -1037,7 +1058,7 @@ impl PythonParser {
                     // For other generic types (e.g., Page[T], CustomGeneric[T])
                     // Recursively extract from inner type
                     if inner_trimmed.contains('[') {
-                        return self.extract_inner_type_recursive(inner_trimmed);
+                        return self.extract_inner_type_recursive_impl(inner_trimmed, depth + 1);
                     }
                     return inner_trimmed.to_string();
                 }
