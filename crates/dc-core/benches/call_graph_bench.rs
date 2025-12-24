@@ -22,6 +22,8 @@ fn build_trivial_graph() -> CallGraph {
             line: 1,
             column: None,
         },
+        request_schema: None,
+        response_schema: None,
     });
     // Reverse edge is not required, but we return index
     // so benchmark has something to measure.

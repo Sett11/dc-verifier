@@ -850,6 +850,18 @@ impl TypeScriptParser {
                                         }
                                     }
 
+                                    // Check if this is z.object() and extract fields
+                                    if self.is_zod_object_call(callee_expr.as_ref()) {
+                                        let fields = self.extract_zod_object_fields(call_expr);
+                                        if !fields.is_empty() {
+                                            // Store fields as JSON
+                                            if let Ok(fields_json) = serde_json::to_string(&fields)
+                                            {
+                                                metadata.insert("fields".to_string(), fields_json);
+                                            }
+                                        }
+                                    }
+
                                     schemas.push(SchemaReference {
                                         name: schema_name,
                                         schema_type: SchemaType::Zod,
@@ -874,7 +886,18 @@ impl TypeScriptParser {
                             let (line, column) =
                                 converter.byte_offset_to_location(span.lo.0 as usize);
 
-                            let metadata = std::collections::HashMap::new();
+                            let mut metadata = std::collections::HashMap::new();
+
+                            // Check if this is z.object() and extract fields
+                            if self.is_zod_object_call(callee_expr.as_ref()) {
+                                let fields = self.extract_zod_object_fields(call_expr);
+                                if !fields.is_empty() {
+                                    // Store fields as JSON
+                                    if let Ok(fields_json) = serde_json::to_string(&fields) {
+                                        metadata.insert("fields".to_string(), fields_json);
+                                    }
+                                }
+                            }
 
                             schemas.push(SchemaReference {
                                 name: "ZodSchema".to_string(),
@@ -910,6 +933,149 @@ impl TypeScriptParser {
                 }
             }
         }
+        false
+    }
+
+    /// Checks if expression is specifically z.object() call
+    fn is_zod_object_call(&self, expr: &Expr) -> bool {
+        if let Expr::Member(member_expr) = expr {
+            if let Expr::Ident(ident) = member_expr.obj.as_ref() {
+                if ident.sym.as_ref() == "z" {
+                    if let MemberProp::Ident(prop) = &member_expr.prop {
+                        return prop.sym.as_ref() == "object";
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Extracts Zod type from an expression
+    /// Handles: z.string(), z.number(), z.boolean(), z.array(), z.object(), etc.
+    /// Also handles chained methods: z.string().email(), z.number().min(1), etc.
+    #[allow(clippy::only_used_in_recursion)]
+    fn extract_zod_type(&self, expr: &Expr) -> String {
+        if let Expr::Call(call) = expr {
+            if let Callee::Expr(callee) = &call.callee {
+                if let Expr::Member(member) = callee.as_ref() {
+                    if let MemberProp::Ident(prop) = &member.prop {
+                        let method = prop.sym.as_ref();
+
+                        // Check if this is a Zod call (z.string, z.number, etc.)
+                        if let Expr::Ident(ident) = member.obj.as_ref() {
+                            if ident.sym.as_ref() == "z" {
+                                // Base type: string, number, boolean, array, object
+                                return method.to_string();
+                            }
+                        }
+
+                        // If not a direct Zod call, might be a chained method
+                        // Recursively check the base expression
+                        return self.extract_zod_type(member.obj.as_ref());
+                    }
+                }
+            }
+        }
+
+        "unknown".to_string()
+    }
+
+    /// Checks if a Zod expression is optional (has .optional() or .nullable())
+    /// Handles chains like: z.string().optional(), z.number().nullable(), etc.
+    #[allow(clippy::only_used_in_recursion)]
+    fn is_zod_optional(&self, expr: &Expr) -> (bool, bool) {
+        if let Expr::Call(call) = expr {
+            if let Callee::Expr(callee) = &call.callee {
+                if let Expr::Member(member) = callee.as_ref() {
+                    if let MemberProp::Ident(prop) = &member.prop {
+                        let method = prop.sym.as_ref();
+
+                        // Check for .optional() or .nullable()
+                        if method == "optional" {
+                            // Recursively check the base expression
+                            let (_, nullable) = self.is_zod_optional(member.obj.as_ref());
+                            return (true, nullable);
+                        } else if method == "nullable" {
+                            // Recursively check the base expression
+                            let (optional, _) = self.is_zod_optional(member.obj.as_ref());
+                            return (optional, true);
+                        } else {
+                            // Continue checking the chain
+                            return self.is_zod_optional(member.obj.as_ref());
+                        }
+                    }
+                }
+            }
+        }
+
+        (false, false)
+    }
+
+    /// Extracts fields from z.object({...}) call
+    /// Example: z.object({ name: z.string(), age: z.number().optional() })
+    fn extract_zod_object_fields(&self, call_expr: &CallExpr) -> Vec<crate::models::ZodField> {
+        let mut fields = Vec::new();
+
+        // Get the first argument (the object literal)
+        if let Some(arg) = call_expr.args.first() {
+            if let Expr::Object(obj_lit) = arg.expr.as_ref() {
+                for prop in &obj_lit.props {
+                    if let PropOrSpread::Prop(prop_box) = prop {
+                        if let Prop::KeyValue(key_value) = prop_box.as_ref() {
+                            // Extract field name
+                            let field_name = match &key_value.key {
+                                PropName::Ident(ident) => ident.sym.as_ref().to_string(),
+                                PropName::Str(str_lit) => {
+                                    str_lit.value.as_str().unwrap_or("").to_string()
+                                }
+                                _ => continue, // Skip other property name types
+                            };
+
+                            // Extract field type and optionality
+                            let field_type = self.extract_zod_type(key_value.value.as_ref());
+                            let (is_optional, is_nullable) =
+                                self.is_zod_optional(key_value.value.as_ref());
+
+                            fields.push(crate::models::ZodField {
+                                name: field_name,
+                                type_name: field_type,
+                                optional: is_optional,
+                                nullable: is_nullable,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        fields
+    }
+
+    /// Returns true if the given TypeScript file looks like it was generated from OpenAPI
+    /// (types.gen.ts, *.gen.ts, or located in openapi-client/generated/sdk directories).
+    fn is_generated_types_file(file_path: &str) -> bool {
+        let lower = file_path.to_lowercase();
+
+        // Explicit generated file patterns
+        if lower.ends_with("types.gen.ts")
+            || lower.ends_with(".gen.ts")
+            || lower.ends_with(".gen.tsx")
+        {
+            return true;
+        }
+
+        // Directory-based heuristics
+        // We don't have Path here, so use simple substring checks.
+        if lower.contains("/openapi-client/")
+            || lower.contains("\\openapi-client\\")
+            || lower.contains("/generated/")
+            || lower.contains("\\generated\\")
+            || lower.contains("/sdk/")
+            || lower.contains("\\sdk\\")
+        {
+            return true;
+        }
+
         false
     }
 
@@ -981,6 +1147,15 @@ impl TypeScriptParser {
                             metadata.insert("fields".to_string(), fields.join(","));
                         }
 
+                        // Mark schemas coming from generated files
+                        if Self::is_generated_types_file(file_path) {
+                            metadata.insert("openapi_generated".to_string(), "true".to_string());
+                            metadata.insert(
+                                "openapi_generated_from".to_string(),
+                                file_path.to_string(),
+                            );
+                        }
+
                         let schema_ref = SchemaReference {
                             name: name.clone(),
                             schema_type: SchemaType::TypeScript,
@@ -1006,6 +1181,17 @@ impl TypeScriptParser {
                         let name = ts_type_alias.id.sym.as_ref().to_string();
                         let base_type = self.ts_type_to_base_type(ts_type_alias.type_ann.as_ref());
 
+                        let mut metadata = std::collections::HashMap::new();
+
+                        // Mark schemas coming from generated files
+                        if Self::is_generated_types_file(file_path) {
+                            metadata.insert("openapi_generated".to_string(), "true".to_string());
+                            metadata.insert(
+                                "openapi_generated_from".to_string(),
+                                file_path.to_string(),
+                            );
+                        }
+
                         let schema_ref = SchemaReference {
                             name: name.clone(),
                             schema_type: SchemaType::TypeScript,
@@ -1014,7 +1200,7 @@ impl TypeScriptParser {
                                 line,
                                 column: Some(column),
                             },
-                            metadata: std::collections::HashMap::new(),
+                            metadata,
                         };
 
                         types.push(TypeInfo {
@@ -1051,6 +1237,12 @@ impl TypeScriptParser {
                     metadata.insert("fields".to_string(), fields.join(","));
                 }
 
+                // Mark schemas coming from generated files
+                if Self::is_generated_types_file(file_path) {
+                    metadata.insert("openapi_generated".to_string(), "true".to_string());
+                    metadata.insert("openapi_generated_from".to_string(), file_path.to_string());
+                }
+
                 let schema_ref = SchemaReference {
                     name: name.clone(),
                     schema_type: SchemaType::TypeScript,
@@ -1076,6 +1268,14 @@ impl TypeScriptParser {
                 let name = ts_type_alias.id.sym.as_ref().to_string();
                 let base_type = self.ts_type_to_base_type(ts_type_alias.type_ann.as_ref());
 
+                let mut metadata = std::collections::HashMap::new();
+
+                // Mark schemas coming from generated files
+                if Self::is_generated_types_file(file_path) {
+                    metadata.insert("openapi_generated".to_string(), "true".to_string());
+                    metadata.insert("openapi_generated_from".to_string(), file_path.to_string());
+                }
+
                 let schema_ref = SchemaReference {
                     name: name.clone(),
                     schema_type: SchemaType::TypeScript,
@@ -1084,7 +1284,7 @@ impl TypeScriptParser {
                         line,
                         column: Some(column),
                     },
-                    metadata: std::collections::HashMap::new(),
+                    metadata,
                 };
 
                 types.push(TypeInfo {
@@ -1137,6 +1337,15 @@ impl TypeScriptParser {
                             metadata.insert("fields".to_string(), fields.join(","));
                         }
 
+                        // Mark schemas coming from generated files
+                        if Self::is_generated_types_file(file_path) {
+                            metadata.insert("openapi_generated".to_string(), "true".to_string());
+                            metadata.insert(
+                                "openapi_generated_from".to_string(),
+                                file_path.to_string(),
+                            );
+                        }
+
                         schemas.push(SchemaReference {
                             name,
                             schema_type: SchemaType::TypeScript,
@@ -1157,6 +1366,15 @@ impl TypeScriptParser {
 
                         let mut metadata = std::collections::HashMap::new();
                         metadata.insert("type".to_string(), type_str);
+
+                        // Mark schemas coming from generated files
+                        if Self::is_generated_types_file(file_path) {
+                            metadata.insert("openapi_generated".to_string(), "true".to_string());
+                            metadata.insert(
+                                "openapi_generated_from".to_string(),
+                                file_path.to_string(),
+                            );
+                        }
 
                         schemas.push(SchemaReference {
                             name,
@@ -1200,6 +1418,12 @@ impl TypeScriptParser {
                     metadata.insert("fields".to_string(), fields.join(","));
                 }
 
+                // Mark schemas coming from generated files
+                if Self::is_generated_types_file(file_path) {
+                    metadata.insert("openapi_generated".to_string(), "true".to_string());
+                    metadata.insert("openapi_generated_from".to_string(), file_path.to_string());
+                }
+
                 schemas.push(SchemaReference {
                     name,
                     schema_type: SchemaType::TypeScript,
@@ -1220,6 +1444,12 @@ impl TypeScriptParser {
 
                 let mut metadata = std::collections::HashMap::new();
                 metadata.insert("type".to_string(), type_str);
+
+                // Mark schemas coming from generated files
+                if Self::is_generated_types_file(file_path) {
+                    metadata.insert("openapi_generated".to_string(), "true".to_string());
+                    metadata.insert("openapi_generated_from".to_string(), file_path.to_string());
+                }
 
                 schemas.push(SchemaReference {
                     name,
@@ -2423,6 +2653,35 @@ interface User {
         assert_eq!(schemas[0].name, "User");
         assert_eq!(schemas[0].schema_type, SchemaType::TypeScript);
         assert!(schemas[0].metadata.contains_key("fields"));
+    }
+
+    #[test]
+    fn test_extract_typescript_schemas_generated_file_metadata() {
+        let parser = TypeScriptParser::new();
+        let source = r#"
+interface Item {
+    id: string;
+}
+"#;
+        let temp_dir = TempDir::new().unwrap();
+        // Imitate common OpenAPI-generated types file
+        let test_file = temp_dir.path().join("types.gen.ts");
+        std::fs::write(&test_file, source).unwrap();
+
+        let (module, _, converter) = parser.parse_file(&test_file).unwrap();
+        let schemas =
+            parser.extract_typescript_schemas(&module, test_file.to_str().unwrap(), &converter);
+
+        assert_eq!(schemas.len(), 1);
+        let schema = &schemas[0];
+        assert_eq!(schema.name, "Item");
+        assert_eq!(schema.schema_type, SchemaType::TypeScript);
+        // New metadata flags for generated files
+        assert_eq!(
+            schema.metadata.get("openapi_generated").map(String::as_str),
+            Some("true")
+        );
+        assert!(schema.metadata.contains_key("openapi_generated_from"));
     }
 
     #[test]

@@ -5,23 +5,22 @@ use dc_core::call_graph::{CallEdge, CallGraph, CallNode};
 use dc_core::models::{Location, NodeId};
 use dc_core::parsers::{DecoratorTarget, TypeScriptDecorator};
 use std::collections::HashMap;
+use tracing::debug;
 
 /// Processor for NestJS decorators
 pub struct NestJSDecoratorProcessor {
     graph: CallGraph,
     controller_paths: HashMap<String, String>, // class_name -> path
     parameter_extractor: Option<ParameterExtractor>,
-    verbose: bool,
 }
 
 impl NestJSDecoratorProcessor {
     /// Creates a new decorator processor
-    pub fn new(graph: CallGraph, verbose: bool) -> Self {
+    pub fn new(graph: CallGraph) -> Self {
         Self {
             graph,
             controller_paths: HashMap::new(),
             parameter_extractor: None,
-            verbose,
         }
     }
 
@@ -125,6 +124,8 @@ impl NestJSDecoratorProcessor {
                             method: route_info.method,
                             handler: route_info.handler,
                             location: route_info.location.clone(),
+                            request_schema: None,
+                            response_schema: None,
                         }));
 
                         // Create edge from Route to handler
@@ -139,16 +140,14 @@ impl NestJSDecoratorProcessor {
                             },
                         );
 
-                        if self.verbose {
-                            eprintln!(
-                                "[DEBUG] Created Route node: {:?} {} -> handler {:?} (request: {:?}, response: {:?})",
-                                route_info.method,
-                                route_info.path,
-                                route_info.handler.0.index(),
-                                request_type.is_some(),
-                                response_type.is_some()
-                            );
-                        }
+                        debug!(
+                            http_method = ?route_info.method,
+                            route_path = %route_info.path,
+                            handler_node_index = route_info.handler.0.index(),
+                            has_request_type = request_type.is_some(),
+                            has_response_type = response_type.is_some(),
+                            "Created Route node"
+                        );
                     }
                 }
             }
@@ -173,15 +172,13 @@ impl NestJSDecoratorProcessor {
 
         self.controller_paths.insert(class_name.to_string(), path);
 
-        if self.verbose {
-            eprintln!(
-                "[DEBUG] Controller '{}' has path: '{}'",
-                class_name,
-                self.controller_paths
-                    .get(class_name)
-                    .unwrap_or(&String::new())
-            );
-        }
+        debug!(
+            class_name = %class_name,
+            controller_path = %self.controller_paths
+                .get(class_name)
+                .unwrap_or(&String::new()),
+            "Controller has path"
+        );
 
         Ok(())
     }
@@ -221,12 +218,11 @@ impl NestJSDecoratorProcessor {
         let handler = match self.find_method_node(class_name, method_name) {
             Some(node) => node,
             None => {
-                if self.verbose {
-                    eprintln!(
-                        "[DEBUG] Failed to find method node for {}.{}",
-                        class_name, method_name
-                    );
-                }
+                debug!(
+                    class_name = %class_name,
+                    method_name = %method_name,
+                    "Failed to find method node"
+                );
                 return Ok(None);
             }
         };

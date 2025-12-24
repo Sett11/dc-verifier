@@ -1,10 +1,11 @@
-use crate::dynamic_routes::DynamicRoutesAnalyzer;
+use crate::dynamic_routes::{DynamicRoutesAnalyzer, DynamicRoutesConfig};
 use crate::pydantic::PydanticExtractor;
 use anyhow::Result;
 use dc_core::call_graph::{CallGraph, CallGraphBuilder, CallNode, HttpMethod};
 use dc_core::models::{Location, NodeId};
 use dc_core::openapi::{OpenAPILinker, OpenAPIParser, OpenAPISchema};
 use std::path::{Path, PathBuf};
+use tracing::{debug, warn};
 
 /// Call graph builder for FastAPI application
 pub struct FastApiCallGraphBuilder {
@@ -13,6 +14,7 @@ pub struct FastApiCallGraphBuilder {
     verbose: bool,
     openapi_schema: Option<OpenAPISchema>,
     openapi_linker: Option<OpenAPILinker>,
+    dynamic_routes_config: Option<DynamicRoutesConfig>,
 }
 
 impl FastApiCallGraphBuilder {
@@ -25,7 +27,14 @@ impl FastApiCallGraphBuilder {
             verbose: false,
             openapi_schema: None,
             openapi_linker: None,
+            dynamic_routes_config: None,
         }
+    }
+
+    /// Enables or disables strict import resolution in the underlying core builder
+    pub fn with_strict_imports(mut self, strict_imports: bool) -> Self {
+        self.core_builder = self.core_builder.with_strict_imports(strict_imports);
+        self
     }
 
     /// Sets the maximum recursion depth
@@ -46,15 +55,25 @@ impl FastApiCallGraphBuilder {
     pub fn with_openapi_schema(mut self, openapi_path: Option<PathBuf>) -> Self {
         if let Some(path) = openapi_path {
             if let Ok(schema) = OpenAPIParser::parse_file(&path) {
-                if self.verbose {
-                    eprintln!("[DEBUG] Loaded OpenAPI schema from {:?}", path);
-                }
+                debug!(
+                    openapi_path = ?path,
+                    "Loaded OpenAPI schema"
+                );
                 self.openapi_schema = Some(schema.clone());
                 self.openapi_linker = Some(OpenAPILinker::new(schema));
-            } else if self.verbose {
-                eprintln!("[WARN] Failed to parse OpenAPI schema from {:?}", path);
+            } else {
+                warn!(
+                    openapi_path = ?path,
+                    "Failed to parse OpenAPI schema"
+                );
             }
         }
+        self
+    }
+
+    /// Sets the dynamic routes configuration
+    pub fn with_dynamic_routes_config(mut self, config: Option<DynamicRoutesConfig>) -> Self {
+        self.dynamic_routes_config = config;
         self
     }
 
@@ -87,19 +106,18 @@ impl FastApiCallGraphBuilder {
         let openapi_linker = self.openapi_linker;
 
         // Analyze dynamic routes (fastapi_users, etc.)
-        let mut dynamic_analyzer = DynamicRoutesAnalyzer::new(verbose);
+        let mut dynamic_analyzer =
+            DynamicRoutesAnalyzer::new().with_config(self.dynamic_routes_config.clone());
 
         // Get the graph (before dynamic routes processing)
         let mut graph =
             if let Ok(dynamic_endpoints) = dynamic_analyzer.analyze_main_file(&entry_point) {
                 if !dynamic_endpoints.is_empty() {
-                    if verbose {
-                        eprintln!(
-                            "[DEBUG] Found {} dynamic endpoints in {:?}",
-                            dynamic_endpoints.len(),
-                            entry_point
-                        );
-                    }
+                    debug!(
+                        endpoint_count = dynamic_endpoints.len(),
+                        entry_point = ?entry_point,
+                        "Found dynamic endpoints"
+                    );
 
                     // Create virtual route nodes in the graph
                     let mut graph = core_builder.into_graph();
@@ -120,9 +138,10 @@ impl FastApiCallGraphBuilder {
         if let Some(linker) = openapi_linker {
             if let Err(err) = Self::enhance_routes_with_openapi_static(&linker, &mut graph, verbose)
             {
-                if verbose {
-                    eprintln!("[WARN] Failed to enhance routes with OpenAPI: {}", err);
-                }
+                warn!(
+                    error = %err,
+                    "Failed to enhance routes with OpenAPI"
+                );
             }
         }
 
@@ -179,22 +198,20 @@ impl FastApiCallGraphBuilder {
             })
             .collect();
 
-        if verbose {
-            eprintln!(
-                "[DEBUG] Found {} route nodes to enhance with OpenAPI",
-                route_nodes.len()
-            );
-        }
+        debug!(
+            route_count = route_nodes.len(),
+            "Found route nodes to enhance with OpenAPI"
+        );
 
         // For each route, find corresponding OpenAPI endpoint and enrich
         for (node_id, path, method) in &route_nodes {
             if let Some(endpoint) = linker.match_route_to_endpoint(path, *method) {
-                if verbose {
-                    eprintln!(
-                        "[DEBUG] Matched route {:?} {} to OpenAPI endpoint (operation_id: {:?})",
-                        method, path, endpoint.operation_id
-                    );
-                }
+                debug!(
+                    http_method = ?method,
+                    route_path = %path,
+                    operation_id = ?endpoint.operation_id,
+                    "Matched route to OpenAPI endpoint"
+                );
 
                 // Try to enrich handler function with OpenAPI schema information
                 if let Some(CallNode::Route { handler, .. }) = graph.node_weight(node_id.0) {
@@ -240,20 +257,21 @@ impl FastApiCallGraphBuilder {
                                     }
                                 }
 
-                                if verbose {
-                                    eprintln!(
-                                        "[DEBUG] Enriched handler with response schema {} for route {:?} {}",
-                                        response_schema_name, method, path
-                                    );
-                                }
+                                debug!(
+                                    response_schema_name = %response_schema_name,
+                                    http_method = ?method,
+                                    route_path = %path,
+                                    "Enriched handler with response schema"
+                                );
                             }
                         }
                     }
                 }
-            } else if verbose {
-                eprintln!(
-                    "[DEBUG] Route {:?} {} not found in OpenAPI schema",
-                    method, path
+            } else {
+                debug!(
+                    http_method = ?method,
+                    route_path = %path,
+                    "Route not found in OpenAPI schema"
                 );
             }
         }
@@ -267,15 +285,15 @@ impl FastApiCallGraphBuilder {
 
         if verbose {
             if !missing_in_openapi.is_empty() {
-                eprintln!(
-                    "[DEBUG] {} routes found in code but not in OpenAPI",
-                    missing_in_openapi.len()
+                debug!(
+                    route_count = missing_in_openapi.len(),
+                    "Routes found in code but not in OpenAPI"
                 );
             }
             if !missing_in_code.is_empty() {
-                eprintln!(
-                    "[DEBUG] {} endpoints found in OpenAPI but not in code (creating virtual routes)",
-                    missing_in_code.len()
+                debug!(
+                    endpoint_count = missing_in_code.len(),
+                    "Endpoints found in OpenAPI but not in code (creating virtual routes)"
                 );
             }
         }
@@ -339,14 +357,15 @@ impl FastApiCallGraphBuilder {
                         line: 0,
                         column: None,
                     },
+                    request_schema: None,
+                    response_schema: None,
                 });
 
-                if verbose {
-                    eprintln!(
-                        "[DEBUG] Created virtual route {:?} {} from OpenAPI (from_openapi: true)",
-                        method, endpoint.path
-                    );
-                }
+                debug!(
+                    http_method = ?method,
+                    route_path = %endpoint.path,
+                    "Created virtual route from OpenAPI"
+                );
             }
         }
 

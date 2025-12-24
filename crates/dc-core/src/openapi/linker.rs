@@ -1,7 +1,8 @@
 use crate::call_graph::HttpMethod;
-use crate::models::{SchemaReference, TypeInfo};
+use crate::models::{PydanticFieldInfo, SchemaReference, TypeInfo};
 use crate::openapi::schema::{OpenAPIEndpoint, OpenAPISchema, OpenAPISchemaComponent};
 use crate::openapi::OpenAPIParser;
+use serde_json;
 use std::collections::HashMap;
 
 /// Links OpenAPI schemas with code artifacts (routes, types, models)
@@ -42,6 +43,108 @@ impl OpenAPILinker {
             "head" => Some(HttpMethod::Head),
             _ => None,
         }
+    }
+
+    /// Checks if Pydantic type is compatible with OpenAPI type
+    fn types_compatible_openapi(pydantic_type: &str, openapi_type: &str) -> bool {
+        // Normalize types to lowercase for comparison
+        let pydantic_normalized = pydantic_type.to_lowercase();
+        let openapi_normalized = openapi_type.to_lowercase();
+
+        // Direct type mappings
+        match (pydantic_normalized.as_str(), openapi_normalized.as_str()) {
+            // String types
+            ("str", "string") | ("string", "str") => true,
+
+            // Integer types
+            ("int", "integer") | ("integer", "int") => true,
+
+            // Boolean types
+            ("bool", "boolean") | ("boolean", "bool") => true,
+
+            // Float/Number types
+            ("float", "number") | ("number", "float") => true,
+            ("double", "number") | ("number", "double") => true,
+
+            // Date/Time types
+            (a, b) if a.contains("date") && b.contains("date") => true,
+            (a, b) if a.contains("time") && b.contains("time") => true,
+            (a, b) if a.contains("datetime") && b.contains("datetime") => true,
+
+            // UUID types
+            (a, b) if a.contains("uuid") && b.contains("uuid") => true,
+
+            // Array types
+            (a, b) if a.starts_with("list[") && b == "array" => true,
+            (a, b) if a.starts_with("array") && b == "array" => true,
+
+            // Object types
+            (a, b) if a.starts_with("dict[") && b == "object" => true,
+            (a, b) if a == "object" && b == "object" => true,
+
+            // Exact match (case-insensitive)
+            (a, b) if a == b => true,
+
+            _ => false,
+        }
+    }
+
+    /// Extracts Pydantic fields from a SchemaReference
+    /// Returns empty vector if fields cannot be extracted
+    fn extract_pydantic_fields(schema_ref: &SchemaReference) -> Vec<PydanticFieldInfo> {
+        // Try to extract from metadata
+        if let Some(fields_json) = schema_ref.metadata.get("fields") {
+            // Try to parse as JSON (new format)
+            if let Ok(fields) = serde_json::from_str::<Vec<PydanticFieldInfo>>(fields_json) {
+                return fields;
+            }
+        }
+
+        Vec::new()
+    }
+
+    /// Matches schemas by comparing field structures
+    /// Returns a similarity score between 0.0 and 1.0
+    /// 1.0 = perfect match, 0.0 = no match
+    fn match_schemas_by_fields(
+        &self,
+        pydantic_fields: &[PydanticFieldInfo],
+        openapi_schema: &OpenAPISchemaComponent,
+    ) -> f64 {
+        let openapi_props = &openapi_schema.properties;
+
+        // If either is empty, return 0.0
+        if pydantic_fields.is_empty() || openapi_props.is_empty() {
+            return 0.0;
+        }
+
+        // Create a map of OpenAPI properties for fast lookup
+        let openapi_map: HashMap<&str, &str> = openapi_props
+            .iter()
+            .map(|(name, type_name)| (name.as_str(), type_name.as_str()))
+            .collect();
+
+        let mut matches = 0;
+
+        // Check each Pydantic field against OpenAPI properties
+        for pydantic_field in pydantic_fields {
+            if let Some(openapi_type) = openapi_map.get(pydantic_field.name.as_str()) {
+                // Field name matches, check type compatibility
+                if Self::types_compatible_openapi(&pydantic_field.type_name, openapi_type) {
+                    matches += 1;
+                }
+            }
+        }
+
+        // Calculate similarity score
+        // Use the maximum of both lengths to penalize missing fields
+        let total = pydantic_fields.len().max(openapi_props.len());
+
+        if total == 0 {
+            return 0.0;
+        }
+
+        matches as f64 / total as f64
     }
 
     /// Creates a new linker from OpenAPI schema
@@ -95,21 +198,26 @@ impl OpenAPILinker {
     }
 
     /// Links a Pydantic model name to an OpenAPI schema
-    /// Uses conservative matching: exact match, case-insensitive, then common variants
-    pub fn link_pydantic_to_openapi(&self, pydantic_name: &str) -> Option<&OpenAPISchemaComponent> {
-        // Try exact match
+    /// Uses conservative matching: exact match, case-insensitive, then common variants,
+    /// and finally field-based matching if name-based matching fails
+    pub fn link_pydantic_to_openapi(
+        &self,
+        pydantic_name: &str,
+        pydantic_schema: Option<&SchemaReference>,
+    ) -> Option<&OpenAPISchemaComponent> {
+        // Strategy 1: Try exact match
         if let Some(schema) = self.schemas.get(pydantic_name) {
             return Some(schema);
         }
 
-        // Try case-insensitive match
+        // Strategy 2: Try case-insensitive match
         for (name, schema) in &self.schemas {
             if name.eq_ignore_ascii_case(pydantic_name) {
                 return Some(schema);
             }
         }
 
-        // Try common Pydantic variants with suffixes/prefixes
+        // Strategy 3: Try common Pydantic variants with suffixes/prefixes
         let variants = [
             format!("{}Schema", pydantic_name),
             format!("{}Model", pydantic_name),
@@ -130,6 +238,36 @@ impl OpenAPILinker {
             // Also try case-insensitive for variants
             for (name, schema) in &self.schemas {
                 if name.eq_ignore_ascii_case(variant) {
+                    return Some(schema);
+                }
+            }
+        }
+
+        // Strategy 4: Field-based matching (NEW)
+        // Only if we have Pydantic schema reference with fields
+        if let Some(pydantic_schema_ref) = pydantic_schema {
+            let pydantic_fields = Self::extract_pydantic_fields(pydantic_schema_ref);
+
+            if !pydantic_fields.is_empty() {
+                let mut best_match: Option<(&OpenAPISchemaComponent, f64)> = None;
+                let threshold = 0.7; // Minimum similarity score (70%)
+
+                // Try all OpenAPI schemas
+                for openapi_schema in self.schemas.values() {
+                    let score = self.match_schemas_by_fields(&pydantic_fields, openapi_schema);
+
+                    if score >= threshold {
+                        if let Some((_, best_score)) = best_match {
+                            if score > best_score {
+                                best_match = Some((openapi_schema, score));
+                            }
+                        } else {
+                            best_match = Some((openapi_schema, score));
+                        }
+                    }
+                }
+
+                if let Some((schema, _)) = best_match {
                     return Some(schema);
                 }
             }

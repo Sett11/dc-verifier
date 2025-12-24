@@ -34,6 +34,7 @@ pub fn find_node_by_name(graph: &CallGraph, name: &str) -> Option<NodeId> {
                 CallNode::Method { name: n, .. } => Some(n == name),
                 CallNode::Route { .. } => None,
                 CallNode::Module { .. } => None,
+                CallNode::Schema { schema } => Some(schema.name == name),
             }) == Some(true)
         })
         .map(NodeId::from)

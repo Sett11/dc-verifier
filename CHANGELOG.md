@@ -100,12 +100,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **FastAPI adapter** - Improved route detection through OpenAPI integration
 - **TypeScript adapter** - Improved API call detection through SDK functions
 - **README.md** updated with new features (progress bars, JSON reports, max_recursion_depth, thiserror, NestJS adapter, frontend libraries, OpenAPI integration)
-- **AUDIT_REPORT.md** updated with latest implementation details and test statistics
 
 ### Fixed
 - Removed outdated TODO comments
 - Fixed temporary value lifetime issues in progress bar messages
-- Synchronized documentation across README, AUDIT_REPORT, and CHANGELOG
+- Synchronized documentation across README and CHANGELOG
 - Fixed all compiler warnings (unused imports, unused variables, dead code)
 - Improved `Box<Expr>` dereferencing handling in Python parser
 

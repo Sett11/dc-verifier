@@ -1,22 +1,23 @@
 use anyhow::Result;
 use clap::Parser;
+use std::path::PathBuf;
 
-mod commands;
-mod config;
-mod reporters;
+use dc_cli::commands;
+use dc_cli::ReportFormat;
+use dc_core::logging::init_from_args;
 
 #[derive(Parser)]
 #[command(name = "dc-verifier")]
 #[command(about = "Data Chains Verifier - data chain integrity verification")]
 struct Cli {
+    /// Log level (error, warn, info, debug, trace)
+    #[arg(long, global = true)]
+    log_level: Option<String>,
+    /// Path to log file
+    #[arg(long, global = true)]
+    log_file: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
-}
-
-#[derive(clap::ValueEnum, Clone, Copy, Debug)]
-pub enum ReportFormat {
-    Markdown,
-    Json,
 }
 
 #[derive(clap::Subcommand)]
@@ -49,6 +50,15 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Extract verbose flag before matching
+    let verbose = match &cli.command {
+        Commands::Check { verbose, .. } => *verbose,
+        _ => false,
+    };
+
+    // Initialize logging before everything else
+    init_from_args(cli.log_level, cli.log_file, verbose)?;
 
     match cli.command {
         Commands::Check {

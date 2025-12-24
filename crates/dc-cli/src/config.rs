@@ -16,6 +16,10 @@ pub struct Config {
     pub max_recursion_depth: Option<usize>,
     /// Global OpenAPI schema path (optional, can be overridden per adapter)
     pub openapi_path: Option<String>,
+    /// Configuration for dynamic route generators
+    pub dynamic_routes: Option<DynamicRoutesConfig>,
+    /// Strict import resolution: fail on unresolved imports (if true)
+    pub strict_imports: Option<bool>,
 }
 
 /// Adapter configuration
@@ -44,6 +48,42 @@ pub struct RulesConfig {
 pub struct OutputConfig {
     pub format: String,
     pub path: String,
+}
+
+/// Configuration for dynamic route generators
+#[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
+pub struct DynamicRoutesConfig {
+    /// List of router generator configurations
+    pub generators: Vec<RouterGeneratorConfig>,
+}
+
+/// Configuration for a single router generator
+#[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
+pub struct RouterGeneratorConfig {
+    /// Module path (e.g., "fastapi_users")
+    pub module: String,
+    /// Method name (e.g., "get_register_router")
+    pub method: String,
+    /// List of endpoints this generator creates
+    pub endpoints: Vec<EndpointConfig>,
+    /// Schema parameter mapping (which argument is request/response schema)
+    pub schema_params: Vec<String>,
+}
+
+/// Configuration for a single endpoint
+#[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
+pub struct EndpointConfig {
+    /// Endpoint path (e.g., "/register")
+    pub path: String,
+    /// HTTP method (e.g., "GET", "POST")
+    pub method: String,
+    /// Index of argument for request schema (if any)
+    pub request_schema_param: Option<usize>,
+    /// Index of argument for response schema (if any)
+    pub response_schema_param: Option<usize>,
 }
 
 impl Config {
@@ -189,5 +229,82 @@ impl Config {
         // Check readability
         fs::metadata(path).with_context(|| format!("{} is not readable: {}", context, path_str))?;
         Ok(())
+    }
+
+    /// Automatically searches for OpenAPI schema files in the project
+    /// Returns the path if found, None otherwise
+    pub fn auto_find_openapi(config_file_path: &str) -> Option<String> {
+        let config_path = Path::new(config_file_path);
+        let project_root = config_path.parent().unwrap_or_else(|| {
+            tracing::warn!(
+                config_path = ?config_path,
+                "Config path has no parent, using current directory"
+            );
+            Path::new(".")
+        });
+
+        // Common OpenAPI schema file names
+        let openapi_files = [
+            "openapi.json",
+            "openapi.yaml",
+            "openapi.yml",
+            "swagger.json",
+        ];
+
+        // Create long-lived PathBufs for project root and common subdirectories
+        let project_root_dir = project_root.to_path_buf();
+        let backend_dir = project_root.join("backend");
+        let fastapi_backend_dir = project_root.join("fastapi_backend");
+        let api_dir = project_root.join("api");
+        let app_dir = project_root.join("app");
+
+        // Search in project root and common subdirectories
+        let search_dirs = [
+            &project_root_dir,
+            &backend_dir,
+            &fastapi_backend_dir,
+            &api_dir,
+            &app_dir,
+        ];
+
+        for dir in &search_dirs {
+            for file_name in &openapi_files {
+                let file_path = dir.join(file_name);
+                if file_path.exists() && file_path.is_file() {
+                    // Try to validate it's a valid JSON/YAML
+                    if let Ok(content) = fs::read_to_string(&file_path) {
+                        // Basic validation: check if it looks like OpenAPI
+                        if content.contains("\"openapi\"")
+                            || content.contains("openapi:")
+                            || content.contains("\"swagger\"")
+                            || content.contains("swagger:")
+                        {
+                            return Some(file_path.to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Auto-fills missing openapi_path fields by searching the project
+    pub fn auto_fill_openapi(&mut self, config_file_path: &str) {
+        // Only search if global openapi_path is not set
+        if self.openapi_path.is_none() {
+            if let Some(found_path) = Self::auto_find_openapi(config_file_path) {
+                self.openapi_path = Some(found_path);
+            }
+        }
+
+        // Auto-fill adapter-specific openapi_path if not set
+        for adapter in &mut self.adapters {
+            if adapter.openapi_path.is_none() && self.openapi_path.is_none() {
+                if let Some(found_path) = Self::auto_find_openapi(config_file_path) {
+                    adapter.openapi_path = Some(found_path);
+                }
+            }
+        }
     }
 }

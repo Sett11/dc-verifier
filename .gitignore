@@ -43,7 +43,7 @@ target/
 *.chain_verification_report.*
 chain_verification_report.*
 *.verification_report.json
-PUBLISHING.md
+IMPROVEMENTS_PLAN.md
 docs_dev/
 
 # Sled database cache (if used)

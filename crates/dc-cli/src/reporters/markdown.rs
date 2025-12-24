@@ -81,7 +81,19 @@ impl MarkdownReporter {
             chains_with_critical
         ));
         report.push_str(&format!("- **Warnings**: {}\n", chains_with_warnings));
-        report.push_str(&format!("- **Valid Chains**: {}\n\n", valid_chains));
+        report.push_str(&format!("- **Valid Chains**: {}\n", valid_chains));
+
+        // Simple coverage-like metric: доля цепочек без критических ошибок
+        let safe_chains = valid_chains;
+        let coverage_percentage = if total_chains > 0 {
+            (safe_chains as f64 / total_chains as f64) * 100.0
+        } else {
+            0.0
+        };
+        report.push_str(&format!(
+            "- **Safe Chains Coverage**: {:.1}%\n\n",
+            coverage_percentage
+        ));
 
         // Add schema summary section
         let schemas = Self::collect_all_schemas(chains);
@@ -153,12 +165,24 @@ impl MarkdownReporter {
                     .links
                     .iter()
                     .find(|l| l.id == contract.from_link_id)
-                    .unwrap();
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Link '{}' not found in chain '{}'",
+                            contract.from_link_id,
+                            chain.id
+                        )
+                    })?;
                 let to_link = chain
                     .links
                     .iter()
                     .find(|l| l.id == contract.to_link_id)
-                    .unwrap();
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Link '{}' not found in chain '{}'",
+                            contract.to_link_id,
+                            chain.id
+                        )
+                    })?;
 
                 report.push_str(&format!(
                     "##### Junction {}: {} → {}\n\n",
@@ -173,6 +197,14 @@ impl MarkdownReporter {
                 report.push_str("\n\n**Target Schema:**\n");
                 report.push_str(&Self::format_schema_info(&contract.to_schema));
                 report.push('\n');
+
+                // If there is a transformation on the target link, show it explicitly
+                if let Some(to_link_transformation) = &to_link.transformation {
+                    report.push_str(&format!(
+                        "**Transformation:** `{:?}`\n\n",
+                        to_link_transformation
+                    ));
+                }
 
                 if contract.mismatches.is_empty() {
                     report.push_str("**Status:** ✅ **CORRECT** - All fields match\n\n");
@@ -492,6 +524,7 @@ impl MarkdownReporter {
             SchemaType::TypeScript => "TypeScript Type",
             SchemaType::OpenAPI => "OpenAPI Schema",
             SchemaType::JsonSchema => "JSON Schema",
+            SchemaType::OrmModel => "ORM Model",
         }
     }
 

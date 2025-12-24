@@ -4,6 +4,7 @@ use rustpython_parser::{ast, parse, Mode};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use tracing::{debug, warn};
 
 use crate::call_graph::decorator::Decorator;
 use crate::call_graph::extractor::PydanticSchemaExtractor;
@@ -27,6 +28,8 @@ pub struct CallGraphBuilder {
     function_nodes: HashMap<String, NodeId>,
     /// Cache of Pydantic models (class name -> SchemaReference)
     pydantic_models: HashMap<String, SchemaReference>,
+    /// Cache of ORM models (class name -> SchemaReference)
+    orm_models: HashMap<String, SchemaReference>,
     /// Optional Pydantic schema extractor for JSON schema extraction
     schema_extractor: Option<Box<dyn PydanticSchemaExtractor>>,
     /// Project root
@@ -37,6 +40,8 @@ pub struct CallGraphBuilder {
     current_depth: usize,
     /// Enable verbose debug output
     verbose: bool,
+    /// Strict import resolution: fail on unresolved imports when true
+    strict_imports: bool,
     /// Import information: file path -> (imported name -> module path)
     /// Stores which names are imported from which modules in each file
     file_imports: HashMap<PathBuf, HashMap<String, String>>,
@@ -51,11 +56,11 @@ impl CallGraphBuilder {
     /// let builder = CallGraphBuilder::new();
     /// ```
     pub fn new() -> Self {
-        Self::with_parser(PythonParser::new())
+        Self::with_parser(PythonParser::new(), false)
     }
 
     /// Creates a call graph builder with a custom parser (for tests)
-    pub fn with_parser(parser: PythonParser) -> Self {
+    pub fn with_parser(parser: PythonParser, strict_imports: bool) -> Self {
         Self {
             graph: CallGraph::new(),
             entry_points: Vec::new(),
@@ -64,11 +69,13 @@ impl CallGraphBuilder {
             module_nodes: HashMap::new(),
             function_nodes: HashMap::new(),
             pydantic_models: HashMap::new(),
+            orm_models: HashMap::new(),
             schema_extractor: None,
             project_root: None,
             max_depth: None,
             current_depth: 0,
             verbose: false,
+            strict_imports,
             file_imports: HashMap::new(),
         }
     }
@@ -82,6 +89,12 @@ impl CallGraphBuilder {
     /// Sets the verbose flag for debug output
     pub fn with_verbose(mut self, verbose: bool) -> Self {
         self.verbose = verbose;
+        self
+    }
+
+    /// Sets strict import resolution mode
+    pub fn with_strict_imports(mut self, strict_imports: bool) -> Self {
+        self.strict_imports = strict_imports;
         self
     }
 
@@ -156,6 +169,87 @@ impl CallGraphBuilder {
         Ok(())
     }
 
+    /// Resolves import according to strict_imports configuration.
+    /// In non-strict mode, unresolved imports are logged (if verbose) and treated as no-op (Ok(None)).
+    /// In strict mode, unresolved imports result in an error.
+    fn resolve_import_with_config(
+        &mut self,
+        import: &Import,
+        current_file: &Path,
+    ) -> Result<Option<PathBuf>> {
+        use crate::models::ImportError;
+
+        let project_root = self
+            .project_root
+            .as_deref()
+            .unwrap_or_else(|| Path::new("."));
+
+        match self
+            .parser
+            .resolve_import_cached(&import.path, project_root)
+        {
+            Ok(Some(path)) => {
+                debug!(
+                    import_path = %import.path,
+                    resolved_path = ?path,
+                    "Resolved import"
+                );
+                Ok(Some(path))
+            }
+            Ok(None) => {
+                let msg = format!(
+                    "Import '{}' from {:?} could not be resolved (treated as local/missing)",
+                    import.path, current_file
+                );
+                if self.strict_imports {
+                    anyhow::bail!("[STRICT IMPORTS] {}", msg);
+                } else {
+                    debug!(
+                        import_path = %import.path,
+                        current_file = ?current_file,
+                        "Import could not be resolved, treated as local/missing"
+                    );
+                    Ok(None)
+                }
+            }
+            Err(ImportError::ExternalDependency { module, suggestion }) => {
+                let msg = format!(
+                    "External dependency not resolved: {} ({}).",
+                    module, suggestion
+                );
+                if self.strict_imports {
+                    anyhow::bail!("[STRICT IMPORTS] {}", msg);
+                } else {
+                    warn!(
+                        import_path = %import.path,
+                        current_file = ?current_file,
+                        module = %module,
+                        suggestion = %suggestion,
+                        "External dependency not resolved, skipping import"
+                    );
+                    Ok(None)
+                }
+            }
+            Err(ImportError::ResolutionFailed { import, reason }) => {
+                let msg = format!(
+                    "Failed to resolve import '{}' from {:?}: {}",
+                    import, current_file, reason
+                );
+                if self.strict_imports {
+                    anyhow::bail!("[STRICT IMPORTS] {}", msg);
+                } else {
+                    warn!(
+                        import = %import,
+                        current_file = ?current_file,
+                        reason = %reason,
+                        "Failed to resolve import, continuing"
+                    );
+                    Ok(None)
+                }
+            }
+        }
+    }
+
     /// Processes an import: adds a node and an edge
     pub fn process_import(
         &mut self,
@@ -163,22 +257,9 @@ impl CallGraphBuilder {
         import: &Import,
         current_file: &Path,
     ) -> Result<NodeId> {
-        let import_path = match self.resolve_import_path(&import.path, current_file) {
-            Ok(path) => {
-                if self.verbose {
-                    eprintln!("[DEBUG] Resolved import '{}' -> {:?}", import.path, path);
-                }
-                path
-            }
-            Err(err) => {
-                if self.verbose {
-                    eprintln!(
-                        "[DEBUG] Failed to resolve import '{}' from {:?}: {}",
-                        import.path, current_file, err
-                    );
-                }
-                return Ok(from);
-            }
+        let import_path = match self.resolve_import_with_config(import, current_file)? {
+            Some(path) => path,
+            None => return Ok(from),
         };
         let module_node = self.get_or_create_module_node(&import_path)?;
 
@@ -194,22 +275,25 @@ impl CallGraphBuilder {
         );
 
         // Recursively build graph for the imported module
-        if self.verbose {
-            eprintln!(
-                "[DEBUG] Recursively building graph for imported module {:?}",
-                import_path
+        debug!(
+            import_path = ?import_path,
+            "Recursively building graph for imported module"
+        );
+        if let Err(err) = self.build_from_entry(&import_path) {
+            warn!(
+                import_path = ?import_path,
+                error = %err,
+                "Failed to recursively build graph for imported module"
             );
         }
-        let _ = self.build_from_entry(&import_path);
 
         // Extract and cache Pydantic models from imported file
         if let Err(err) = self.extract_and_cache_pydantic_models(&import_path) {
-            if self.verbose {
-                eprintln!(
-                    "[DEBUG] Failed to extract Pydantic models from {:?}: {}",
-                    import_path, err
-                );
-            }
+            debug!(
+                import_path = ?import_path,
+                error = %err,
+                "Failed to extract Pydantic models"
+            );
         }
 
         // If import has specific names (e.g., "from api.routers import auth"),
@@ -218,7 +302,13 @@ impl CallGraphBuilder {
             let import_dir = if import_path.is_dir() {
                 &import_path
             } else {
-                import_path.parent().unwrap_or_else(|| Path::new("."))
+                import_path.parent().unwrap_or_else(|| {
+                    warn!(
+                        import_path = ?import_path,
+                        "Import path has no parent, using current directory"
+                    );
+                    Path::new(".")
+                })
             };
 
             for name in &import.names {
@@ -230,12 +320,12 @@ impl CallGraphBuilder {
 
                 for candidate in submodule_candidates {
                     if candidate.exists() {
-                        if self.verbose {
-                            eprintln!(
-                                "[DEBUG] Found submodule '{}' from import '{}': {:?}",
-                                name, import.path, candidate
-                            );
-                        }
+                        debug!(
+                            submodule_name = %name,
+                            import_path = %import.path,
+                            candidate_path = ?candidate,
+                            "Found submodule from import"
+                        );
                         let _ = self.build_from_entry(&candidate);
                         break; // Found it, no need to try other candidates
                     }
@@ -305,34 +395,32 @@ impl CallGraphBuilder {
     /// Processes a FastAPI decorator (@app.post)
     pub fn process_decorator(&mut self, decorator: &Decorator, current_file: &Path) -> Result<()> {
         if !self.is_route_decorator(&decorator.name) {
-            if self.verbose {
-                eprintln!(
-                    "[DEBUG] Decorator '{}' is not a route decorator (file: {:?})",
-                    decorator.name, current_file
-                );
-            }
+            debug!(
+                decorator_name = %decorator.name,
+                file_path = ?current_file,
+                "Decorator is not a route decorator"
+            );
             return Ok(());
         }
 
         let handler_name = match &decorator.target_function {
             Some(name) => name,
             None => {
-                if self.verbose {
-                    eprintln!(
-                        "[DEBUG] Route decorator '{}' has no target function (file: {:?})",
-                        decorator.name, current_file
-                    );
-                }
+                debug!(
+                    decorator_name = %decorator.name,
+                    file_path = ?current_file,
+                    "Route decorator has no target function"
+                );
                 return Ok(());
             }
         };
 
-        if self.verbose {
-            eprintln!(
-                "[DEBUG] Processing route decorator '{}' -> handler '{}' (file: {:?})",
-                decorator.name, handler_name, current_file
-            );
-        }
+        debug!(
+            decorator_name = %decorator.name,
+            handler_name = %handler_name,
+            file_path = ?current_file,
+            "Processing route decorator"
+        );
 
         // Try to find handler node - handle qualified names (ClassName.method)
         let handler_node = if handler_name.contains('.') {
@@ -340,30 +428,25 @@ impl CallGraphBuilder {
             let parts: Vec<&str> = handler_name.split('.').collect();
             let simple_name = parts.last().copied().unwrap_or(handler_name);
 
-            if self.verbose {
-                eprintln!(
-                    "[DEBUG] Handler name '{}' contains '.', trying qualified then simple name '{}'",
-                    handler_name, simple_name
-                );
-            }
+            debug!(
+                handler_name = %handler_name,
+                simple_name = %simple_name,
+                "Handler name contains '.', trying qualified then simple name"
+            );
 
             // First try qualified name as-is
             if let Some(node) = self.find_function_node(handler_name, current_file) {
-                if self.verbose {
-                    eprintln!(
-                        "[DEBUG] Found handler using qualified name '{}'",
-                        handler_name
-                    );
-                }
+                debug!(
+                    handler_name = %handler_name,
+                    "Found handler using qualified name"
+                );
                 Some(node)
             } else {
                 // Fall back to simple name
-                if self.verbose {
-                    eprintln!(
-                        "[DEBUG] Qualified name failed, trying simple name '{}'",
-                        simple_name
-                    );
-                }
+                debug!(
+                    simple_name = %simple_name,
+                    "Qualified name failed, trying simple name"
+                );
                 self.find_function_node(simple_name, current_file)
             }
         } else {
@@ -371,12 +454,11 @@ impl CallGraphBuilder {
         };
 
         let Some(handler_node) = handler_node else {
-            if self.verbose {
-                eprintln!(
-                    "[DEBUG] Failed to find function node for handler '{}' in file {:?}",
-                    handler_name, current_file
-                );
-            }
+            debug!(
+                handler_name = %handler_name,
+                file_path = ?current_file,
+                "Failed to find function node for handler"
+            );
             return Ok(());
         };
 
@@ -393,6 +475,94 @@ impl CallGraphBuilder {
         if location.file.is_empty() {
             location.file = current_file.to_string_lossy().to_string();
         }
+
+        // Extract request body schema from handler function parameters
+        let request_body_schema =
+            self.graph
+                .node_weight(handler_node.0)
+                .and_then(|node| match node {
+                    CallNode::Function { parameters, .. } | CallNode::Method { parameters, .. } => {
+                        // Find first parameter that is a request body
+                        parameters.iter().find_map(|param| {
+                            // Check if this is a request body parameter
+                            if !self.is_request_body_parameter(param) {
+                                return None;
+                            }
+
+                            // Extract schema from parameter
+                            // 1. Check if it's Annotated[T, Body()]
+                            if let Some(ref schema_ref) = &param.type_info.schema_ref {
+                                let type_name = &schema_ref.name;
+
+                                // Extract from Annotated[T, Body()]
+                                if type_name.starts_with("Annotated[") {
+                                    let inner_type = self.extract_annotated_inner_type(type_name);
+                                    if !inner_type.is_empty() {
+                                        // Check if inner type is a Pydantic model
+                                        let simple_name = inner_type
+                                            .rsplit('.')
+                                            .next()
+                                            .unwrap_or(&inner_type)
+                                            .trim()
+                                            .to_string();
+                                        if let Some(pydantic_model) =
+                                            self.pydantic_models.get(&simple_name)
+                                        {
+                                            return Some(pydantic_model.clone());
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 2. Check if parameter has a Pydantic schema reference
+                            if let Some(schema_ref) = &param.type_info.schema_ref {
+                                if schema_ref.schema_type == SchemaType::Pydantic {
+                                    return Some(schema_ref.clone());
+                                }
+                            }
+
+                            // 3. Check if type name matches a Pydantic model in cache
+                            if let Some(schema_ref) = &param.type_info.schema_ref {
+                                let simple_name = schema_ref
+                                    .name
+                                    .rsplit('.')
+                                    .next()
+                                    .unwrap_or(&schema_ref.name)
+                                    .trim()
+                                    .to_string();
+                                if let Some(pydantic_model) = self.pydantic_models.get(&simple_name)
+                                {
+                                    return Some(pydantic_model.clone());
+                                }
+                            }
+
+                            // 4. Check parameter name (for parameters without annotations)
+                            // In FastAPI, if parameter name matches a Pydantic model, it's treated as body
+                            if param.type_info.schema_ref.is_none() {
+                                // Try to find Pydantic model by parameter name
+                                let param_name_capitalized = if !param.name.is_empty() {
+                                    let mut chars = param.name.chars();
+                                    if let Some(first) = chars.next() {
+                                        format!("{}{}", first.to_uppercase(), chars.as_str())
+                                    } else {
+                                        param.name.clone()
+                                    }
+                                } else {
+                                    param.name.clone()
+                                };
+
+                                if let Some(pydantic_model) =
+                                    self.pydantic_models.get(&param_name_capitalized)
+                                {
+                                    return Some(pydantic_model.clone());
+                                }
+                            }
+
+                            None
+                        })
+                    }
+                    _ => None,
+                });
 
         // Check for response_model in decorator keyword arguments
         let response_model_type = decorator
@@ -420,9 +590,11 @@ impl CallGraphBuilder {
                     self.resolve_schema_from_imports(&response_model_name, current_file)
                 {
                     if self.verbose {
-                        eprintln!(
-                            "[DEBUG] Failed to resolve schema '{}' from imports in {:?}: {}",
-                            response_model_name, current_file, err
+                        debug!(
+                            schema_name = %response_model_name,
+                            file_path = ?current_file,
+                            error = %err,
+                            "Failed to resolve schema from imports"
                         );
                     }
                 }
@@ -434,12 +606,49 @@ impl CallGraphBuilder {
                     // Check if schema already has JSON schema in metadata
                     if !model.metadata.contains_key("json_schema") {
                         if let Err(err) = extractor.enrich_schema(model) {
-                            if self.verbose {
-                                eprintln!(
-                                    "[DEBUG] Failed to enrich schema for {}: {}",
-                                    response_model_name, err
-                                );
-                            }
+                            debug!(
+                                schema_name = %response_model_name,
+                                error = %err,
+                                "Failed to enrich schema"
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Apply response_model to handler node's return_type
+            if let Some(handler_node) = self.graph.node_weight_mut(handler_node.0) {
+                // Get the Pydantic model schema reference
+                if let Some(pydantic_model) = self.pydantic_models.get(&response_model_name) {
+                    let return_type = Some(TypeInfo {
+                        base_type: BaseType::Object,
+                        schema_ref: Some(pydantic_model.clone()),
+                        constraints: Vec::new(),
+                        optional: false,
+                    });
+
+                    // Update handler node's return_type
+                    match handler_node {
+                        CallNode::Function {
+                            return_type: rt, ..
+                        } => {
+                            *rt = return_type;
+                            debug!(
+                                schema_name = %response_model_name,
+                                "Applied response_model to handler function return_type"
+                            );
+                        }
+                        CallNode::Method {
+                            return_type: rt, ..
+                        } => {
+                            *rt = return_type;
+                            debug!(
+                                schema_name = %response_model_name,
+                                "Applied response_model to handler method return_type"
+                            );
+                        }
+                        _ => {
+                            // Handler is not a function or method, skip
                         }
                     }
                 }
@@ -498,11 +707,46 @@ impl CallGraphBuilder {
             }
         }
 
+        // Store request body schema in route metadata if found
+        // Note: Route nodes don't have metadata field, so we'll store it in handler node's metadata
+        // via the schema reference in parameters, which is already done
+        // For now, we just log it if verbose
+        if let Some(ref req_schema) = request_body_schema {
+            debug!(
+                schema_name = %req_schema.name,
+                http_method = ?http_method,
+                route_path = %route_path,
+                "Found request body schema for route"
+            );
+        }
+
+        // Get response_model_schema for Route node
+        let response_model_schema = if let Some(ref response_model_str) = response_model_type {
+            // Extract base model name (handle generic types like Page[ItemRead] -> ItemRead)
+            let base_model_name = self
+                .parser
+                .extract_base_model_from_response_model(response_model_str);
+            let response_model_name = base_model_name
+                .rsplit('.')
+                .next()
+                .unwrap_or(&base_model_name)
+                .trim()
+                .to_string();
+
+            // Get schema from cache
+            self.pydantic_models.get(&response_model_name).cloned()
+        } else {
+            // Try to get from handler's return_type
+            handler_returns_data.and_then(|rt| rt.schema_ref.clone())
+        };
+
         let route_node = NodeId::from(self.graph.add_node(CallNode::Route {
             path: route_path.clone(),
             method: http_method,
             handler: handler_node,
             location: location.clone(),
+            request_schema: request_body_schema.clone(),
+            response_schema: response_model_schema.clone(),
         }));
 
         self.graph.add_edge(
@@ -516,21 +760,276 @@ impl CallGraphBuilder {
             },
         );
 
-        if self.verbose {
-            eprintln!(
-                "[DEBUG] Created route node: {} {} -> handler node {:?} (file: {:?})",
-                format!("{:?}", http_method).to_uppercase(),
-                route_path,
-                handler_node.0.index(),
-                current_file
-            );
-        }
+        debug!(
+            http_method = ?http_method,
+            route_path = %route_path,
+            handler_node_index = handler_node.0.index(),
+            file_path = ?current_file,
+            "Created route node"
+        );
 
         Ok(())
     }
 
+    /// Links Pydantic models with SQLAlchemy models based on from_attributes
+    /// This should be called after the graph is built to ensure all classes are available
+    pub fn link_pydantic_to_sqlalchemy(&mut self) {
+        // Find all Pydantic models with from_attributes=True
+        let pydantic_with_from_attrs: Vec<(String, SchemaReference)> = self
+            .pydantic_models
+            .iter()
+            .filter(|(_, model)| {
+                model
+                    .metadata
+                    .get("from_attributes")
+                    .map(|v| v == "true" || v == "True")
+                    .unwrap_or(false)
+            })
+            .map(|(name, model)| (name.clone(), model.clone()))
+            .collect();
+
+        if pydantic_with_from_attrs.is_empty() {
+            return;
+        }
+
+        // Find all SQLAlchemy models from cache (instead of searching in graph)
+        let sqlalchemy_models: Vec<(String, SchemaReference)> = self
+            .orm_models
+            .iter()
+            .map(|(name, schema_ref)| (name.clone(), schema_ref.clone()))
+            .collect();
+
+        // Link Pydantic models to SQLAlchemy models
+        for (pydantic_name, mut pydantic_model) in pydantic_with_from_attrs {
+            // Extract Pydantic fields from metadata
+            let pydantic_fields: Vec<crate::models::PydanticFieldInfo> =
+                if let Some(fields_json) = pydantic_model.metadata.get("fields") {
+                    serde_json::from_str(fields_json).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
+            // Try to find matching SQLAlchemy model
+            // Strategy 1: Exact name match (e.g., ItemRead -> Item)
+            // Strategy 2: Remove common suffixes (Read, Create, Update, etc.)
+            // Strategy 3: Field-based matching (NEW)
+            let base_name = pydantic_name
+                .trim_end_matches("Read")
+                .trim_end_matches("Create")
+                .trim_end_matches("Update")
+                .trim_end_matches("Delete")
+                .trim_end_matches("Response")
+                .trim_end_matches("Request")
+                .trim_end_matches("Schema")
+                .trim_end_matches("Model")
+                .to_string();
+
+            let mut best_match: Option<(String, SchemaReference, f64)> = None;
+
+            for (sql_name, sql_schema) in &sqlalchemy_models {
+                let mut match_score = 0.0;
+
+                // Strategy 1: Exact name match
+                if sql_name == &pydantic_name {
+                    match_score = 1.0;
+                }
+                // Strategy 2: Base name match (remove suffixes)
+                else if sql_name == &base_name {
+                    match_score = 0.9;
+                }
+                // Strategy 3: Field-based matching
+                else if !pydantic_fields.is_empty() {
+                    // Extract SQLAlchemy fields from metadata
+                    let sql_fields: Vec<crate::models::SQLAlchemyField> = sql_schema
+                        .metadata
+                        .get("fields")
+                        .and_then(|json| serde_json::from_str(json).ok())
+                        .unwrap_or_default();
+
+                    let field_match = self.match_fields(&pydantic_fields, &sql_fields);
+                    if field_match > 0.7 {
+                        match_score = field_match;
+                    }
+                }
+
+                // Update best match if this is better
+                if match_score > 0.0 {
+                    if let Some((_, _, best_score)) = &best_match {
+                        if match_score > *best_score {
+                            best_match = Some((sql_name.clone(), sql_schema.clone(), match_score));
+                        }
+                    } else {
+                        best_match = Some((sql_name.clone(), sql_schema.clone(), match_score));
+                    }
+                }
+            }
+
+            // Use best match if found
+            if let Some((sql_name, sql_schema, match_score)) = best_match {
+                // Find the SQLAlchemy node in the graph for metadata
+                let sql_node_id = self.graph.node_indices().find_map(|idx| {
+                    if let Some(CallNode::Class { name, .. }) = self.graph.node_weight(idx) {
+                        if name == &sql_name {
+                            return Some(NodeId::from(idx));
+                        }
+                    }
+                    None
+                });
+
+                let sql_file = PathBuf::from(&sql_schema.location.file);
+
+                // Store the link in metadata
+                pydantic_model
+                    .metadata
+                    .insert("sqlalchemy_model".to_string(), sql_name.clone());
+                pydantic_model.metadata.insert(
+                    "sqlalchemy_location".to_string(),
+                    format!("{}:{}", sql_schema.location.file, sql_schema.location.line),
+                );
+                if let Some(node_id) = sql_node_id {
+                    pydantic_model.metadata.insert(
+                        "sqlalchemy_node_id".to_string(),
+                        format!("{}", node_id.0.index()),
+                    );
+                }
+                // Also store match score for debugging
+                pydantic_model.metadata.insert(
+                    "sqlalchemy_match_score".to_string(),
+                    format!("{:.2}", match_score),
+                );
+
+                debug!(
+                    pydantic_name = %pydantic_name,
+                    sql_name = %sql_name,
+                    sql_file = ?sql_file,
+                    match_score = match_score,
+                    "Linked Pydantic model to SQLAlchemy model"
+                );
+
+                // Update the cached model
+                self.pydantic_models
+                    .insert(pydantic_name.clone(), pydantic_model.clone());
+
+                // Create DataFlow edge in graph if both nodes exist
+                if let Some(pydantic_node_id) = self.find_class_node_by_name(&pydantic_name) {
+                    if let Some(sql_node_id) = sql_node_id {
+                        // Create bidirectional edge: Pydantic ↔ ORM
+                        // Edge from Pydantic to ORM (transformation: from_attributes)
+                        self.graph.add_edge(
+                            pydantic_node_id.0,
+                            sql_node_id.0,
+                            CallEdge::DataFlow {
+                                from: pydantic_node_id,
+                                to: sql_node_id,
+                                from_schema: pydantic_model.clone(),
+                                to_schema: Box::new(sql_schema.clone()),
+                                location: pydantic_model.location.clone(),
+                                transformation: Some(
+                                    crate::models::TransformationType::FromAttributes,
+                                ),
+                            },
+                        );
+
+                        // Create reverse edge (ORM → Pydantic) for bidirectional flow
+                        // This represents the reverse transformation (ORM → Pydantic)
+                        self.graph.add_edge(
+                            sql_node_id.0,
+                            pydantic_node_id.0,
+                            CallEdge::DataFlow {
+                                from: sql_node_id,
+                                to: pydantic_node_id,
+                                from_schema: sql_schema.clone(),
+                                to_schema: Box::new(pydantic_model.clone()),
+                                location: sql_schema.location.clone(),
+                                transformation: Some(
+                                    crate::models::TransformationType::OrmToPydantic,
+                                ),
+                            },
+                        );
+
+                        debug!(
+                            pydantic_name = %pydantic_name,
+                            sql_name = %sql_name,
+                            "Created DataFlow edge: Pydantic ↔ ORM"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Checks if a class is a SQLAlchemy model by analyzing its AST
+    fn is_sqlalchemy_model(ast: &ast::Mod, class_name: &str) -> bool {
+        if let ast::Mod::Module(module) = ast {
+            for stmt in &module.body {
+                if let ast::Stmt::ClassDef(class_def) = stmt {
+                    if class_def.name.to_string() == class_name {
+                        // Check if class inherits from common SQLAlchemy base classes
+                        for base in &class_def.bases {
+                            let base_str = Self::expr_to_string_static(base);
+                            let last_segment = base_str
+                                .rsplit('.')
+                                .next()
+                                .or_else(|| base_str.rsplit("::").next())
+                                .unwrap_or(&base_str);
+
+                            // Common SQLAlchemy base class names
+                            if last_segment == "Base"
+                                || last_segment == "declarative_base"
+                                || base_str.contains("SQLAlchemyBase")
+                                || base_str.contains("db.Model")
+                                || base_str.contains("Model")
+                            {
+                                // Additional check: look for Column attributes in class body
+                                for body_stmt in &class_def.body {
+                                    if let ast::Stmt::AnnAssign(ann_assign) = body_stmt {
+                                        // Check if annotation suggests SQLAlchemy (Column, relationship, etc.)
+                                        let annotation_str = Self::expr_to_string_static(
+                                            ann_assign.annotation.as_ref(),
+                                        );
+                                        if annotation_str.contains("Column")
+                                            || annotation_str.contains("relationship")
+                                            || annotation_str.contains("Mapped")
+                                        {
+                                            return true;
+                                        }
+                                    }
+                                }
+                                // If it inherits from Base/Model, it's likely SQLAlchemy
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Helper function to convert expression to string (static version for use in is_sqlalchemy_model)
+    fn expr_to_string_static(expr: &ast::Expr) -> String {
+        match expr {
+            ast::Expr::Name(name) => name.id.to_string(),
+            ast::Expr::Attribute(attr) => {
+                format!(
+                    "{}.{}",
+                    Self::expr_to_string_static(attr.value.as_ref()),
+                    attr.attr
+                )
+            }
+            ast::Expr::Subscript(sub) => {
+                let base = Self::expr_to_string_static(sub.value.as_ref());
+                let slice = Self::expr_to_string_static(sub.slice.as_ref());
+                format!("{}[{}]", base, slice)
+            }
+            _ => String::new(),
+        }
+    }
+
     /// Gets the built graph
-    pub fn into_graph(self) -> CallGraph {
+    pub fn into_graph(mut self) -> CallGraph {
+        // Link Pydantic models to SQLAlchemy models before returning the graph
+        self.link_pydantic_to_sqlalchemy();
         self.graph
     }
 
@@ -570,9 +1069,11 @@ impl CallGraphBuilder {
 
         for import in &imports {
             if let Err(err) = self.process_import(module_node, import, file_path) {
-                eprintln!(
-                    "Failed to process import {} in {:?}: {}",
-                    import.path, file_path, err
+                warn!(
+                    import_path = %import.path,
+                    file_path = ?file_path,
+                    error = %err,
+                    "Failed to process import"
                 );
             }
 
@@ -827,17 +1328,24 @@ impl CallGraphBuilder {
         let class_name = class_def.name.to_string();
 
         // Check if this is a Pydantic model and cache it
-        // Check if any base class is BaseModel
-        let is_pydantic = class_def.bases.iter().any(|base| {
-            let base_str = self.parser.expr_to_string(base);
-            // Use rsplit to get the last segment efficiently
-            let last_segment = base_str
-                .rsplit('.')
-                .next()
-                .or_else(|| base_str.rsplit("::").next())
-                .unwrap_or(&base_str);
-            last_segment == "BaseModel" || base_str == "pydantic.BaseModel"
-        });
+        // Strategy:
+        //   1) прямое наследование от BaseModel / pydantic.BaseModel
+        //   2) рекурсивное наследование от уже известной Pydantic‑модели (например, ItemCreate(ItemBase))
+        //   3) рекурсивная проверка базовых классов в текущем файле
+
+        // Read AST to check base classes in current file
+        let file_ast = if let Ok(source) = std::fs::read_to_string(file_path) {
+            rustpython_parser::parse(
+                &source,
+                rustpython_parser::Mode::Module,
+                file_path.to_string_lossy().as_ref(),
+            )
+            .ok()
+        } else {
+            None
+        };
+
+        let is_pydantic = self.is_pydantic_model_recursive(class_def, file_ast.as_ref(), file_path);
 
         if is_pydantic {
             let range = class_def.range();
@@ -863,12 +1371,11 @@ impl CallGraphBuilder {
                         // Enrich with JSON schema if extractor is available
                         if let Some(ref extractor) = self.schema_extractor {
                             if let Err(err) = extractor.enrich_schema(&mut model) {
-                                if self.verbose {
-                                    eprintln!(
-                                        "[DEBUG] Failed to enrich schema for {}: {}",
-                                        class_name, err
-                                    );
-                                }
+                                debug!(
+                                    class_name = %class_name,
+                                    error = %err,
+                                    "Failed to enrich schema"
+                                );
                             }
                         }
 
@@ -889,6 +1396,18 @@ impl CallGraphBuilder {
                     }
                 }
             }
+        }
+
+        // Check if this is an ORM model and cache it
+        if let Ok(Some(orm_model)) =
+            self.extract_and_cache_orm_model(class_def, file_path, converter)
+        {
+            debug!(
+                model_name = %orm_model.name,
+                file_path = %file_path.to_string_lossy(),
+                line = orm_model.location.line,
+                "Found ORM model"
+            );
         }
 
         let node_id = NodeId::from(self.graph.add_node(CallNode::Class {
@@ -932,12 +1451,11 @@ impl CallGraphBuilder {
             // Enrich with JSON schema if extractor is available
             if let Some(ref extractor) = self.schema_extractor {
                 if let Err(err) = extractor.enrich_schema(&mut model) {
-                    if self.verbose {
-                        eprintln!(
-                            "[DEBUG] Failed to enrich schema for {}: {}",
-                            model.name, err
-                        );
-                    }
+                    debug!(
+                        model_name = %model.name,
+                        error = %err,
+                        "Failed to enrich schema"
+                    );
                 }
             }
             self.pydantic_models.insert(model.name.clone(), model);
@@ -965,9 +1483,11 @@ impl CallGraphBuilder {
 
             if let Some(caller) = caller_node {
                 if let Err(err) = self.process_call(caller, &call, file_path) {
-                    eprintln!(
-                        "Failed to process call {} in {:?}: {}",
-                        call.name, file_path, err
+                    warn!(
+                        call_name = %call.name,
+                        file_path = ?file_path,
+                        error = %err,
+                        "Failed to process call"
                     );
                 }
             }
@@ -986,32 +1506,28 @@ impl CallGraphBuilder {
             .parser
             .extract_decorators(module_ast, &file_path_str, converter);
 
-        if self.verbose {
-            eprintln!(
-                "[DEBUG] Processing {} decorators in file {:?}",
-                decorators.len(),
-                file_path
-            );
-        }
+        debug!(
+            decorator_count = decorators.len(),
+            file_path = ?file_path,
+            "Processing decorators in file"
+        );
 
         for decorator in decorators {
-            if self.verbose {
-                eprintln!(
-                    "[DEBUG] Extracted decorator '{}' -> target: {:?} (file: {:?}, line: {})",
-                    decorator.name,
-                    decorator.target_function,
-                    decorator.location.file,
-                    decorator.location.line
-                );
-            }
+            debug!(
+                decorator_name = %decorator.name,
+                target_function = ?decorator.target_function,
+                file_path = %decorator.location.file,
+                line = decorator.location.line,
+                "Extracted decorator"
+            );
 
             if let Err(err) = self.process_decorator(&decorator, file_path) {
-                if self.verbose {
-                    eprintln!(
-                        "[DEBUG] Failed to process decorator {} in {:?}: {}",
-                        decorator.name, file_path, err
-                    );
-                }
+                debug!(
+                    decorator_name = %decorator.name,
+                    file_path = ?file_path,
+                    error = %err,
+                    "Failed to process decorator"
+                );
             }
         }
         Ok(())
@@ -1142,13 +1658,160 @@ impl CallGraphBuilder {
         }
     }
 
+    /// Extracts inner type from Annotated[T, Body()] or Annotated[T, Query()]
+    /// Returns inner_type_expr and annotation_type string
+    /// annotation_type: "Body", "Query", "Path", "Header", or None
+    fn extract_annotated_type(
+        &self,
+        annotation: &ast::Expr,
+    ) -> Option<(Box<ast::Expr>, Option<String>)> {
+        if let ast::Expr::Subscript(sub) = annotation {
+            let base_str = self.parser.expr_to_string(sub.value.as_ref());
+            if base_str == "Annotated" || base_str.ends_with(".Annotated") {
+                if let ast::Expr::Tuple(tuple) = sub.slice.as_ref() {
+                    if tuple.elts.len() >= 2 {
+                        let inner_type = tuple.elts[0].clone();
+                        let annotation_expr = &tuple.elts[1];
+
+                        // Extract annotation type (Body, Query, Path, Header)
+                        let annotation_type = self.extract_annotation_type_name(annotation_expr);
+
+                        return Some((Box::new(inner_type), annotation_type));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Extracts annotation type name from expression
+    /// Body() -> "Body", Query() -> "Query", etc.
+    fn extract_annotation_type_name(&self, expr: &ast::Expr) -> Option<String> {
+        match expr {
+            ast::Expr::Call(call) => {
+                // Use expr_to_string to get the function name
+                let func_str = self.parser.expr_to_string(&call.func);
+                // Extract last component (Body, Query, etc.)
+                // Handle cases like "Body(...)" or "fastapi.Body(...)"
+                if let Some(open_paren) = func_str.find('(') {
+                    let name_part = &func_str[..open_paren];
+                    let last_component = name_part.rsplit('.').next().unwrap_or(name_part);
+                    return Some(last_component.to_string());
+                } else {
+                    let last_component = func_str.rsplit('.').next().unwrap_or(&func_str);
+                    return Some(last_component.to_string());
+                }
+            }
+            ast::Expr::Name(name) => {
+                return Some(name.id.to_string());
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Extracts inner type from Annotated[T, Body()] string representation
+    /// Annotated[ItemCreate, Body()] -> ItemCreate
+    fn extract_annotated_inner_type(&self, annotated_str: &str) -> String {
+        // Format: Annotated[TypeName, CallExpr]
+        if let Some(start) = annotated_str.find('[') {
+            if let Some(comma) = annotated_str[start..].find(',') {
+                let inner = &annotated_str[start + 1..start + comma];
+                return inner.trim().to_string();
+            }
+            // If no comma, try to extract everything before first ']'
+            if let Some(end) = annotated_str[start..].find(']') {
+                let inner = &annotated_str[start + 1..start + end];
+                return inner.trim().to_string();
+            }
+        }
+        String::new()
+    }
+
+    /// Checks if a parameter is a request body (not Query/Path/Header)
+    fn is_request_body_parameter(&self, param: &Parameter) -> bool {
+        // Check if type_info contains Annotated with Query/Path/Header
+        if let Some(ref schema_ref) = param.type_info.schema_ref {
+            let type_name = &schema_ref.name;
+
+            // Check if it's Annotated with Query, Path, or Header
+            if type_name.contains("Query(")
+                || type_name.contains("Path(")
+                || type_name.contains("Header(")
+            {
+                return false; // Not a body parameter
+            }
+
+            // If it's Annotated with Body, it's definitely a body parameter
+            if type_name.contains("Body(") {
+                return true;
+            }
+        }
+
+        // Check parameter name for service types
+        let service_types = [
+            "Depends",
+            "Request",
+            "Response",
+            "HTTPException",
+            "BackgroundTasks",
+            "UploadFile",
+            "File",
+            "Form",
+            "db",
+            "session",
+            "current_user",
+            "user",
+        ];
+        if service_types
+            .iter()
+            .any(|&st| param.name.contains(st) || param.name == st)
+        {
+            return false;
+        }
+
+        // If it's a Pydantic model, it's likely a body parameter
+        if let Some(ref schema_ref) = param.type_info.schema_ref {
+            if schema_ref.schema_type == SchemaType::Pydantic {
+                return true;
+            }
+        }
+
+        // Check if type name matches a Pydantic model
+        let type_str = if let Some(ref schema_ref) = param.type_info.schema_ref {
+            &schema_ref.name
+        } else {
+            return false;
+        };
+
+        let simple_name = type_str
+            .rsplit('.')
+            .next()
+            .unwrap_or(type_str)
+            .trim()
+            .to_string();
+
+        if self.pydantic_models.contains_key(&simple_name) {
+            return true;
+        }
+
+        false
+    }
+
     /// Resolves a type annotation to TypeInfo, checking if it's a Pydantic model
     fn resolve_type_annotation(
         &self,
         annotation: &ast::Expr,
-        _file_path: &Path,
-        _line: usize,
+        file_path: &Path,
+        line: usize,
     ) -> TypeInfo {
+        // First, check if it's Annotated[T, ...]
+        if let Some((inner_type_expr, _annotation_type)) = self.extract_annotated_type(annotation) {
+            // Recursively resolve the inner type
+            return self.resolve_type_annotation(inner_type_expr.as_ref(), file_path, line);
+        }
+
+        // Continue with existing logic for non-Annotated types
         // Convert annotation to string representation
         let type_str = self.parser.expr_to_string(annotation);
 
@@ -1227,8 +1890,8 @@ impl CallGraphBuilder {
                 name: "Object".to_string(),
                 schema_type: SchemaType::JsonSchema, // Keep as JsonSchema for missing schemas
                 location: Location {
-                    file: _file_path.to_string_lossy().to_string(),
-                    line: _line,
+                    file: file_path.to_string_lossy().to_string(),
+                    line,
                     column: None,
                 },
                 metadata,
@@ -1309,21 +1972,19 @@ impl CallGraphBuilder {
         let normalized = Self::normalize_path(current_file);
         let direct_key = Self::function_key(&normalized, name);
 
-        if self.verbose {
-            eprintln!(
-                "[DEBUG] Searching for function '{}' in file {:?} (direct key: {})",
-                name, current_file, direct_key
-            );
-        }
+        debug!(
+            function_name = %name,
+            file_path = ?current_file,
+            direct_key = %direct_key,
+            "Searching for function"
+        );
 
         if let Some(node) = self.function_nodes.get(&direct_key) {
-            if self.verbose {
-                eprintln!(
-                    "[DEBUG] Found direct match for '{}' -> node {:?}",
-                    name,
-                    node.0.index()
-                );
-            }
+            debug!(
+                function_name = %name,
+                node_index = node.0.index(),
+                "Found direct match for function"
+            );
             return Some(*node);
         }
 
@@ -1335,32 +1996,28 @@ impl CallGraphBuilder {
             .collect();
 
         if self.verbose {
-            eprintln!(
-                "[DEBUG] Found {} suffix matches for '{}'",
-                matches.len(),
-                name
+            debug!(
+                match_count = matches.len(),
+                function_name = %name,
+                "Found suffix matches"
             );
         }
 
         if matches.is_empty() {
-            if self.verbose {
-                eprintln!(
-                    "[DEBUG] No suffix matches, trying graph search for '{}'",
-                    name
-                );
-            }
+            debug!(
+                function_name = %name,
+                "No suffix matches, trying graph search"
+            );
             return crate::call_graph::find_node_by_name(&self.graph, name);
         }
 
         if matches.len() == 1 {
-            if self.verbose {
-                eprintln!(
-                    "[DEBUG] Single match found for '{}' -> node {:?} (key: {})",
-                    name,
-                    matches[0].1 .0.index(),
-                    matches[0].0
-                );
-            }
+            debug!(
+                function_name = %name,
+                node_index = matches[0].1.0.index(),
+                key = %matches[0].0,
+                "Single match found"
+            );
             return Some(*matches[0].1);
         }
 
@@ -1375,14 +2032,12 @@ impl CallGraphBuilder {
                     false
                 }
             }) {
-                if self.verbose {
-                    eprintln!(
-                        "[DEBUG] Selected exact path match for '{}' -> node {:?} (key: {})",
-                        name,
-                        node.0.index(),
-                        key
-                    );
-                }
+                debug!(
+                    function_name = %name,
+                    node_index = node.0.index(),
+                    key = %key,
+                    "Selected exact path match"
+                );
                 return Some(**node);
             }
         }
@@ -1398,15 +2053,13 @@ impl CallGraphBuilder {
 
         if let Some((key, node)) = best_match {
             // Log warning about ambiguity
-            if self.verbose {
-                eprintln!(
-                    "[DEBUG] Warning: Ambiguous function name '{}' found {} matches, selected best match -> node {:?} (key: {})",
-                    name,
-                    matches.len(),
-                    node.0.index(),
-                    key
-                );
-            }
+            warn!(
+                function_name = %name,
+                match_count = matches.len(),
+                node_index = node.0.index(),
+                key = %key,
+                "Ambiguous function name, selected best match"
+            );
             return Some(**node);
         }
 
@@ -1414,19 +2067,18 @@ impl CallGraphBuilder {
         let mut sorted_matches = matches.clone();
         sorted_matches.sort_by(|(key_a, _), (key_b, _)| key_a.cmp(key_b));
         if let Some((key, node)) = sorted_matches.first() {
-            if self.verbose {
-                eprintln!(
-                    "[DEBUG] Selected first match (sorted) for '{}' -> node {:?} (key: {})",
-                    name,
-                    node.0.index(),
-                    key
-                );
-            }
+            debug!(
+                function_name = %name,
+                node_index = node.0.index(),
+                key = %key,
+                "Selected first match (sorted)"
+            );
             Some(**node)
         } else {
-            if self.verbose {
-                eprintln!("[DEBUG] No match found for '{}' after all attempts", name);
-            }
+            debug!(
+                function_name = %name,
+                "No match found after all attempts"
+            );
             None
         }
     }
@@ -1477,6 +2129,13 @@ impl CallGraphBuilder {
                     None
                 } else {
                     Some(PathBuf::from(location.file))
+                }
+            }
+            CallNode::Schema { schema } => {
+                if schema.location.file.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(&schema.location.file))
                 }
             }
         }
@@ -1575,41 +2234,41 @@ impl CallGraphBuilder {
             };
 
             if self.verbose {
-                eprintln!(
-                    "[DEBUG] Trying to resolve '{}': absolute={:?}, relative={:?}, app_dir={:?}",
-                    import_path, absolute_candidate, relative_candidate, app_dir_candidate
+                debug!(
+                    import_path = %import_path,
+                    absolute_candidate = ?absolute_candidate,
+                    relative_candidate = ?relative_candidate,
+                    app_dir_candidate = ?app_dir_candidate,
+                    "Trying to resolve import"
                 );
             }
 
             // Try app directory first (for imports like "app.schemas")
             if let Some(ref app_candidate) = app_dir_candidate {
                 if app_candidate.exists() {
-                    if self.verbose {
-                        eprintln!(
-                            "[DEBUG] Found '{}' via app directory resolution: {:?}",
-                            import_path, app_candidate
-                        );
-                    }
+                    debug!(
+                        import_path = %import_path,
+                        candidate_path = ?app_candidate,
+                        "Found import via app directory resolution"
+                    );
                     return Ok(app_candidate.clone());
                 }
             }
 
             // Try relative first (more common for same-package imports)
             if relative_candidate.exists() {
-                if self.verbose {
-                    eprintln!(
-                        "[DEBUG] Found '{}' via relative resolution: {:?}",
-                        import_path, relative_candidate
-                    );
-                }
+                debug!(
+                    import_path = %import_path,
+                    candidate_path = ?relative_candidate,
+                    "Found import via relative resolution"
+                );
                 relative_candidate
             } else if absolute_candidate.exists() {
-                if self.verbose {
-                    eprintln!(
-                        "[DEBUG] Found '{}' via absolute resolution: {:?}",
-                        import_path, absolute_candidate
-                    );
-                }
+                debug!(
+                    import_path = %import_path,
+                    candidate_path = ?absolute_candidate,
+                    "Found import via absolute resolution"
+                );
                 absolute_candidate
             } else {
                 // Neither exists, return absolute for error message
@@ -1626,22 +2285,21 @@ impl CallGraphBuilder {
             let mut with_ext = candidate.clone();
             with_ext.set_extension("py");
             if with_ext.exists() {
-                if self.verbose {
-                    eprintln!(
-                        "[DEBUG] Found '{}' with .py extension: {:?}",
-                        import_path, with_ext
-                    );
-                }
+                debug!(
+                    import_path = %import_path,
+                    candidate_path = ?with_ext,
+                    "Found import with .py extension"
+                );
                 return Ok(with_ext);
             }
         }
 
-        if self.verbose {
-            eprintln!(
-                "[DEBUG] Cannot resolve import path '{}' from {:?} (tried: {:?})",
-                import_path, current_file, candidate
-            );
-        }
+        debug!(
+            import_path = %import_path,
+            current_file = ?current_file,
+            candidate = ?candidate,
+            "Cannot resolve import path"
+        );
 
         anyhow::bail!(
             "Cannot resolve import path {} from {:?}",
@@ -1742,18 +2400,20 @@ impl CallGraphBuilder {
                 // Extract and cache Pydantic models from the imported module
                 if let Err(err) = self.extract_and_cache_pydantic_models(&module_file) {
                     if self.verbose {
-                        eprintln!(
-                            "[DEBUG] Failed to extract models from {:?}: {}",
-                            module_file, err
+                        debug!(
+                            module_file = ?module_file,
+                            error = %err,
+                            "Failed to extract models"
                         );
                     }
                 } else {
                     // Check if the schema is now in cache
                     if self.pydantic_models.contains_key(schema_name) {
                         if self.verbose {
-                            eprintln!(
-                                "[DEBUG] Successfully resolved schema '{}' from module {:?}",
-                                schema_name, module_file
+                            debug!(
+                                schema_name = %schema_name,
+                                module_file = ?module_file,
+                                "Successfully resolved schema from module"
                             );
                         }
                         return Ok(());
@@ -1768,19 +2428,17 @@ impl CallGraphBuilder {
         let processed_files: Vec<PathBuf> = self.processed_files.iter().cloned().collect();
         for file_path in &processed_files {
             if let Err(err) = self.extract_and_cache_pydantic_models(file_path) {
-                if self.verbose {
-                    eprintln!(
-                        "[DEBUG] Failed to extract models from {:?} during fallback search: {}",
-                        file_path, err
-                    );
-                }
+                debug!(
+                    file_path = ?file_path,
+                    error = %err,
+                    "Failed to extract models during fallback search"
+                );
             } else if self.pydantic_models.contains_key(schema_name) {
-                if self.verbose {
-                    eprintln!(
-                        "[DEBUG] Successfully resolved schema '{}' via fallback search in {:?}",
-                        schema_name, file_path
-                    );
-                }
+                debug!(
+                    schema_name = %schema_name,
+                    file_path = ?file_path,
+                    "Successfully resolved schema via fallback search"
+                );
                 return Ok(());
             }
         }
@@ -1918,8 +2576,29 @@ impl CallGraphBuilder {
         None
     }
 
-    /// Processes a Pydantic transformation call
-    /// Creates a special edge in the call graph to track data transformations
+    /// Classifies a Pydantic transformation method name into a TransformationType
+    fn classify_transformation(&self, method: &str) -> Option<crate::models::TransformationType> {
+        use crate::models::TransformationType::*;
+
+        match method {
+            // Constructors / validators from various inputs
+            "model_validate" | "parse_obj" => Some(ValidateData),
+            "model_validate_json" | "parse_raw" => Some(ValidateJson),
+            "model_validate_dict" => Some(FromDict),
+            "from_orm" | "from_attributes" => Some(FromOrm),
+
+            // Dumps / serialization
+            "model_dump" | "dict" => Some(ToDict),
+            "model_dump_json" | "json" => Some(ToJson),
+            "model_serialize" => Some(Serialize),
+
+            _ => None,
+        }
+    }
+
+    /// Processes a Pydantic transformation call:
+    /// - determines source/target schemas
+    /// - creates a DataFlow edge with concrete TransformationType
     fn process_pydantic_transformation(
         &mut self,
         caller: NodeId,
@@ -1929,72 +2608,442 @@ impl CallGraphBuilder {
     ) -> Result<NodeId> {
         let (method, model_name) = transform_info;
 
-        // Try to find the model in our cache
-        let model_schema = self.pydantic_models.get(&model_name).cloned();
-
-        // Create return type from model name
-        let return_type = if let Some(schema) = &model_schema {
-            Some(TypeInfo {
-                base_type: BaseType::Object,
-                schema_ref: Some(schema.clone()),
-                constraints: Vec::new(),
-                optional: false,
-            })
-        } else {
-            Some(TypeInfo {
-                base_type: BaseType::Object,
-                schema_ref: Some(SchemaReference {
-                    name: model_name.clone(),
-                    schema_type: SchemaType::Pydantic,
-                    location: call.location.clone(),
-                    metadata: HashMap::new(),
-                }),
-                constraints: Vec::new(),
-                optional: false,
-            })
+        // Map method -> high‑level transformation type
+        let Some(transformation_type) = self.classify_transformation(&method) else {
+            // If for какой‑то метод нет явной классификации — считаем обычным вызовом
+            if self.verbose {
+                debug!(
+                    method = %method,
+                    "Pydantic method not classified as transformation, using regular call"
+                );
+            }
+            return self.process_call(caller, call, current_file);
         };
 
-        // Create a virtual transformation node
-        let transform_node_id = NodeId::from(self.graph.add_node(CallNode::Function {
-            name: format!("{}.{}", model_name, method),
-            file: current_file.to_path_buf(),
-            line: call.location.line,
-            parameters: vec![],
-            return_type,
-        }));
+        // Try to find the Pydantic model schema by name
+        let to_schema = self
+            .pydantic_models
+            .get(&model_name)
+            .cloned()
+            .unwrap_or_else(|| SchemaReference {
+                name: model_name.clone(),
+                schema_type: SchemaType::Pydantic,
+                location: call.location.clone(),
+                metadata: HashMap::new(),
+            });
 
-        // Add edge with transformation metadata
-        let argument_mapping = call
-            .arguments
-            .iter()
-            .enumerate()
-            .map(|(idx, arg)| {
-                let key = arg
-                    .parameter_name
-                    .clone()
-                    .unwrap_or_else(|| format!("arg{}", idx));
-                (key, arg.value.clone())
-            })
-            .collect();
+        // For now we model "from" side heuristically:
+        // - constructors/validators: data (dict/json/ORM) → Pydantic
+        // - dumps/serialization: Pydantic → data (dict/json)
+        let from_schema = match transformation_type {
+            crate::models::TransformationType::FromDict
+            | crate::models::TransformationType::ValidateData => SchemaReference {
+                name: "Dict".to_string(),
+                schema_type: SchemaType::JsonSchema,
+                location: call.location.clone(),
+                metadata: HashMap::new(),
+            },
+            crate::models::TransformationType::FromJson
+            | crate::models::TransformationType::ValidateJson => SchemaReference {
+                name: "Json".to_string(),
+                schema_type: SchemaType::JsonSchema,
+                location: call.location.clone(),
+                metadata: HashMap::new(),
+            },
+            crate::models::TransformationType::FromOrm
+            | crate::models::TransformationType::FromAttributes
+            | crate::models::TransformationType::OrmToPydantic => SchemaReference {
+                name: "OrmModel".to_string(),
+                schema_type: SchemaType::OrmModel,
+                location: call.location.clone(),
+                metadata: HashMap::new(),
+            },
+            crate::models::TransformationType::ToDict => to_schema.clone(),
+            crate::models::TransformationType::ToJson
+            | crate::models::TransformationType::Serialize
+            | crate::models::TransformationType::PydanticToOrm => to_schema.clone(),
+        };
 
+        let (from_schema, to_schema) = match transformation_type {
+            // Data → Pydantic
+            crate::models::TransformationType::FromDict
+            | crate::models::TransformationType::FromJson
+            | crate::models::TransformationType::FromOrm
+            | crate::models::TransformationType::FromAttributes
+            | crate::models::TransformationType::ValidateData
+            | crate::models::TransformationType::ValidateJson
+            | crate::models::TransformationType::OrmToPydantic => (from_schema, to_schema),
+            // Pydantic → Data / ORM
+            crate::models::TransformationType::ToDict
+            | crate::models::TransformationType::ToJson
+            | crate::models::TransformationType::Serialize
+            | crate::models::TransformationType::PydanticToOrm => (to_schema.clone(), from_schema),
+        };
+
+        // Create dedicated DataFlow edge between abstract "data" and concrete Pydantic model
+        // Create self-loop edge to represent data transformation within the same node
+        // This is intentional: the transformation (e.g., model_dump_json) happens
+        // within the caller node, so we create an edge from caller to itself
         self.graph.add_edge(
             *caller,
-            *transform_node_id,
-            CallEdge::Call {
-                caller,
-                callee: transform_node_id,
-                argument_mapping,
+            *caller,
+            CallEdge::DataFlow {
+                from: caller,
+                to: caller,
+                from_schema,
+                to_schema: Box::new(to_schema),
                 location: call.location.clone(),
+                transformation: Some(transformation_type.clone()),
             },
         );
 
         if self.verbose {
-            eprintln!(
-                "[DEBUG] Detected Pydantic transformation: {}.{} (model: {})",
-                model_name, method, model_name
+            debug!(
+                model_name = %model_name,
+                method = %method,
+                transformation_type = ?transformation_type,
+                "Pydantic transformation classified"
             );
         }
 
-        Ok(transform_node_id)
+        Ok(caller)
+    }
+
+    /// Recursively checks if a class is a Pydantic model
+    /// Checks direct inheritance from BaseModel, known Pydantic models in cache,
+    /// and base classes in the current file (recursively)
+    /// Uses visited set to prevent infinite recursion in case of circular inheritance
+    fn is_pydantic_model_recursive(
+        &self,
+        class_def: &ast::StmtClassDef,
+        file_ast: Option<&ast::Mod>,
+        file_path: &Path,
+    ) -> bool {
+        self.is_pydantic_model_recursive_impl(class_def, file_ast, file_path, &mut HashSet::new())
+    }
+
+    #[allow(clippy::only_used_in_recursion)]
+    fn is_pydantic_model_recursive_impl(
+        &self,
+        class_def: &ast::StmtClassDef,
+        file_ast: Option<&ast::Mod>,
+        file_path: &Path,
+        visited: &mut HashSet<String>,
+    ) -> bool {
+        let class_name = class_def.name.to_string();
+
+        // Prevent infinite recursion in case of circular inheritance
+        if visited.contains(&class_name) {
+            return false;
+        }
+        visited.insert(class_name);
+
+        // Check direct inheritance from BaseModel
+        let has_base_model = class_def.bases.iter().any(|base| {
+            let base_str = self.parser.expr_to_string(base);
+            let last_segment = base_str
+                .rsplit('.')
+                .next()
+                .or_else(|| base_str.rsplit("::").next())
+                .unwrap_or(&base_str);
+            last_segment == "BaseModel" || base_str == "pydantic.BaseModel"
+        });
+
+        if has_base_model {
+            return true;
+        }
+
+        // Check if any base is already known Pydantic model (from cache)
+        for base in &class_def.bases {
+            let base_str = self.parser.expr_to_string(base);
+            let simple_name = base_str
+                .rsplit('.')
+                .next()
+                .or_else(|| base_str.rsplit("::").next())
+                .unwrap_or(&base_str);
+
+            if self.pydantic_models.contains_key(simple_name) {
+                return true;
+            }
+        }
+
+        // Recursively check base classes in current file
+        if let Some(ast::Mod::Module(module)) = file_ast {
+            for base in &class_def.bases {
+                let base_str = self.parser.expr_to_string(base);
+                let simple_name = base_str
+                    .rsplit('.')
+                    .next()
+                    .or_else(|| base_str.rsplit("::").next())
+                    .unwrap_or(&base_str);
+
+                // Find base class in current file
+                for stmt in &module.body {
+                    if let ast::Stmt::ClassDef(base_class_def) = stmt {
+                        if base_class_def.name.as_str() == simple_name {
+                            // Recursively check if base class is Pydantic
+                            if self.is_pydantic_model_recursive_impl(
+                                base_class_def,
+                                file_ast,
+                                file_path,
+                                visited,
+                            ) {
+                                return true;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Extracts column type from SQLAlchemy annotation
+    /// Examples:
+    /// - Mapped[int] -> ("int", false)
+    /// - Column(Integer) -> ("Integer", false)
+    /// - Mapped[Optional[str]] -> ("str", true)
+    fn extract_column_type(&self, annotation_str: &str) -> (String, bool) {
+        // Handle Mapped[T] syntax (SQLAlchemy 2.0+)
+        if annotation_str.contains("Mapped[") {
+            if let Some(start) = annotation_str.find('[') {
+                if let Some(end) = annotation_str.rfind(']') {
+                    let inner = &annotation_str[start + 1..end];
+                    // Check for Optional[T]
+                    if inner.trim_start().starts_with("Optional[") {
+                        let type_start = inner.find('[').unwrap_or(0) + 1;
+                        let type_end = inner.rfind(']').unwrap_or(inner.len());
+                        let base_type = &inner[type_start..type_end];
+                        return (base_type.trim().to_string(), true);
+                    }
+                    return (inner.trim().to_string(), false);
+                }
+            }
+        }
+
+        // Handle Column(Type) syntax (SQLAlchemy 1.x)
+        if annotation_str.contains("Column(") {
+            // Extract type from Column(Integer), Column(String), etc.
+            if let Some(start) = annotation_str.find('(') {
+                if let Some(end) = annotation_str.rfind(')') {
+                    let inner = &annotation_str[start + 1..end];
+                    // Try to extract type name
+                    let type_name = inner.split(',').next().unwrap_or(inner).trim();
+                    // Check for nullable parameter
+                    let nullable = inner.to_lowercase().contains("nullable=true");
+                    return (type_name.to_string(), nullable);
+                }
+            }
+        }
+
+        // Fallback: try to extract common types
+        let type_lower = annotation_str.to_lowercase();
+        if type_lower.contains("integer") || type_lower.contains("int") {
+            ("Integer".to_string(), false)
+        } else if type_lower.contains("string") || type_lower.contains("str") {
+            ("String".to_string(), false)
+        } else if type_lower.contains("boolean") || type_lower.contains("bool") {
+            ("Boolean".to_string(), false)
+        } else if type_lower.contains("float") {
+            ("Float".to_string(), false)
+        } else {
+            ("Unknown".to_string(), false)
+        }
+    }
+
+    /// Extracts and caches ORM model from a class definition
+    fn extract_and_cache_orm_model(
+        &mut self,
+        class_def: &ast::StmtClassDef,
+        file_path: &Path,
+        converter: &LocationConverter,
+    ) -> Result<Option<SchemaReference>> {
+        let class_name = class_def.name.to_string();
+
+        // Read AST to check if this is a SQLAlchemy model
+        let file_ast = if let Ok(source) = std::fs::read_to_string(file_path) {
+            rustpython_parser::parse(
+                &source,
+                rustpython_parser::Mode::Module,
+                file_path.to_string_lossy().as_ref(),
+            )
+            .ok()
+        } else {
+            None
+        };
+
+        let is_orm = if let Some(ast) = &file_ast {
+            Self::is_sqlalchemy_model(ast, &class_name)
+        } else {
+            false
+        };
+
+        if !is_orm {
+            return Ok(None);
+        }
+
+        let range = class_def.range();
+        let (line, column) = converter.byte_offset_to_location(range.start().into());
+
+        // Extract ORM fields
+        let orm_fields = self.extract_sqlalchemy_fields(class_def);
+
+        // Create SchemaReference
+        let mut metadata = HashMap::new();
+        metadata.insert("orm_type".to_string(), "sqlalchemy".to_string());
+
+        // Store fields as JSON
+        if let Ok(fields_json) = serde_json::to_string(&orm_fields) {
+            metadata.insert("fields".to_string(), fields_json);
+        }
+
+        let schema_ref = SchemaReference {
+            name: class_name.clone(),
+            schema_type: SchemaType::OrmModel,
+            location: Location {
+                file: file_path.to_string_lossy().to_string(),
+                line,
+                column: Some(column),
+            },
+            metadata,
+        };
+
+        // Add to cache
+        self.orm_models
+            .insert(class_name.clone(), schema_ref.clone());
+
+        Ok(Some(schema_ref))
+    }
+
+    /// Extracts fields from a SQLAlchemy model
+    fn extract_sqlalchemy_fields(
+        &self,
+        class_def: &ast::StmtClassDef,
+    ) -> Vec<crate::models::SQLAlchemyField> {
+        let mut fields = Vec::new();
+
+        for body_stmt in &class_def.body {
+            if let ast::Stmt::AnnAssign(ann_assign) = body_stmt {
+                if let ast::Expr::Name(name) = ann_assign.target.as_ref() {
+                    let field_name = name.id.to_string();
+                    let annotation_str = self.parser.expr_to_string(ann_assign.annotation.as_ref());
+
+                    // Check if annotation contains Column or Mapped
+                    if annotation_str.contains("Column") || annotation_str.contains("Mapped") {
+                        // Skip special fields like __tablename__
+                        if field_name.starts_with("__") {
+                            continue;
+                        }
+                        let (type_name, nullable) = self.extract_column_type(&annotation_str);
+                        fields.push(crate::models::SQLAlchemyField {
+                            name: field_name,
+                            type_name,
+                            nullable,
+                        });
+                    }
+                }
+            }
+        }
+
+        fields
+    }
+
+    /// Checks if SQLAlchemy type is compatible with Pydantic type
+    fn types_compatible(&self, sql_type: &str, pydantic_type: &str) -> bool {
+        // Normalize types to lowercase for comparison
+        let sql_lower = sql_type.to_lowercase();
+        let pydantic_lower = pydantic_type.to_lowercase();
+
+        // Direct matches
+        if sql_lower == pydantic_lower {
+            return true;
+        }
+
+        // Type mappings
+        match (sql_lower.as_str(), pydantic_lower.as_str()) {
+            // Integer types
+            ("integer", "int") | ("int", "integer") => true,
+
+            // String types
+            ("string", "str") | ("str", "string") => true,
+            ("text", "str") | ("str", "text") => true,
+
+            // Boolean types
+            ("boolean", "bool") | ("bool", "boolean") => true,
+
+            // Numeric types
+            ("float", "float") => true,
+            ("numeric", "float") | ("float", "numeric") => true,
+            ("decimal", "float") | ("float", "decimal") => true,
+
+            // UUID types
+            (a, b) if a.contains("uuid") && b.contains("uuid") => true,
+
+            // Date/Time types
+            (a, b)
+                if (a.contains("date") || a.contains("time"))
+                    && (b.contains("date") || b.contains("time")) =>
+            {
+                true
+            }
+
+            // JSON types
+            (a, b)
+                if (a.contains("json") || a == "dict")
+                    && (b.contains("json") || b == "dict" || b == "object") =>
+            {
+                true
+            }
+
+            _ => false,
+        }
+    }
+
+    /// Matches Pydantic fields with SQLAlchemy fields and returns match percentage
+    fn match_fields(
+        &self,
+        pydantic_fields: &[crate::models::PydanticFieldInfo],
+        sqlalchemy_fields: &[crate::models::SQLAlchemyField],
+    ) -> f64 {
+        if pydantic_fields.is_empty() || sqlalchemy_fields.is_empty() {
+            return 0.0;
+        }
+
+        let mut matches = 0;
+        let total = pydantic_fields.len().max(sqlalchemy_fields.len());
+
+        for pydantic_field in pydantic_fields {
+            if let Some(sql_field) = sqlalchemy_fields
+                .iter()
+                .find(|sa_field| sa_field.name == pydantic_field.name)
+            {
+                // Check type compatibility
+                if self.types_compatible(&sql_field.type_name, &pydantic_field.type_name) {
+                    // Also check optionality compatibility
+                    // SQLAlchemy nullable=true should match Pydantic optional=true
+                    if sql_field.nullable == pydantic_field.optional {
+                        matches += 1;
+                    }
+                    // Note: Partial match (types match but optionality differs) is not counted
+                    // This can be adjusted in the future if needed
+                }
+            }
+        }
+
+        matches as f64 / total as f64
+    }
+
+    /// Finds a class node by name in the graph
+    fn find_class_node_by_name(&self, class_name: &str) -> Option<NodeId> {
+        self.graph.node_indices().find_map(|idx| {
+            if let Some(CallNode::Class { name, .. }) = self.graph.node_weight(idx) {
+                if name == class_name {
+                    return Some(NodeId::from(idx));
+                }
+            }
+            None
+        })
     }
 }

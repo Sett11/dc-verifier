@@ -1,4 +1,4 @@
-use crate::models::{Contract, Location, SchemaReference};
+use crate::models::{Contract, Location, SchemaReference, TransformationType};
 use petgraph::graph::NodeIndex;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::ops::Deref;
@@ -59,6 +59,9 @@ pub struct Link {
     pub node_id: NodeId,
     /// Data schema at this link
     pub schema_ref: SchemaReference,
+    /// Optional transformation that produced this link (for transformer nodes)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transformation: Option<TransformationType>,
 }
 
 /// Link type in chain

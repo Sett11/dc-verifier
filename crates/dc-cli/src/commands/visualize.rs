@@ -1,11 +1,15 @@
-use crate::config::Config;
+use crate::config::{Config, DynamicRoutesConfig, EndpointConfig, RouterGeneratorConfig};
 use anyhow::Result;
-use dc_adapter_fastapi::FastApiCallGraphBuilder;
+use dc_adapter_fastapi::{
+    DynamicRoutesConfig as AdapterDynamicRoutesConfig, EndpointConfig as AdapterEndpointConfig,
+    FastApiCallGraphBuilder, RouterGeneratorConfig as AdapterRouterGeneratorConfig,
+};
 use dc_core::call_graph::{CallEdge, CallGraph, CallNode};
 use dc_typescript::TypeScriptCallGraphBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::path::PathBuf;
+use tracing::error;
 
 /// Visualizes call graphs (optional function)
 pub fn execute_visualize(config_path: &str) -> Result<()> {
@@ -18,7 +22,7 @@ pub fn execute_visualize(config_path: &str) -> Result<()> {
     pb.set_style(
         ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} adapters {msg}")
-            .unwrap()
+            .expect("Failed to create progress bar template")
             .progress_chars("#>-"),
     );
     pb.set_message("Building graphs...");
@@ -37,7 +41,14 @@ pub fn execute_visualize(config_path: &str) -> Result<()> {
                     .ok_or_else(|| anyhow::anyhow!("FastAPI adapter requires app_path"))?;
                 let app_path = PathBuf::from(app_path);
 
-                let builder = FastApiCallGraphBuilder::new(app_path);
+                let mut builder = FastApiCallGraphBuilder::new(app_path)
+                    .with_strict_imports(config.strict_imports.unwrap_or(false));
+                // Convert and set dynamic routes config
+                let adapter_dynamic_routes = config
+                    .dynamic_routes
+                    .as_ref()
+                    .map(|dr| convert_dynamic_routes_config(dr));
+                builder = builder.with_dynamic_routes_config(adapter_dynamic_routes);
                 let graph = builder.build_graph()?;
                 let unique_id = format!("{}_{}", adapter_config.adapter_type, idx);
                 all_graphs.push((unique_id, graph));
@@ -55,7 +66,10 @@ pub fn execute_visualize(config_path: &str) -> Result<()> {
                 all_graphs.push((unique_id, graph));
             }
             _ => {
-                eprintln!("Unknown adapter type: {}", adapter_config.adapter_type);
+                error!(
+                    adapter_type = %adapter_config.adapter_type,
+                    "Unknown adapter type"
+                );
             }
         }
         pb.inc(1);
@@ -198,12 +212,30 @@ fn format_node_label(node: &CallNode) -> String {
             };
             format!("Route: {} {}", method_str, path)
         }
+        CallNode::Schema { schema } => {
+            format!("Schema: {} ({:?})", schema.name, schema.schema_type)
+        }
     }
 }
 
 /// Formats edge label for DOT
 fn format_edge_label(edge: &CallEdge) -> String {
     match edge {
+        CallEdge::DataFlow {
+            from_schema,
+            to_schema,
+            transformation,
+            ..
+        } => {
+            let transform_str = transformation
+                .as_ref()
+                .map(|t| format!(" ({:?})", t))
+                .unwrap_or_default();
+            format!(
+                "{} → {} [label=\"{}{}\", style=dashed, color=purple]",
+                from_schema.name, to_schema.name, "DataFlow", transform_str
+            )
+        }
         CallEdge::Import { import_path, .. } => {
             format!("import: {}", import_path)
         }
@@ -229,4 +261,37 @@ fn escape_dot_string(s: &str) -> String {
         .replace("\n", "\\n")
         .replace("\r", "\\r")
         .replace("\t", "\\t")
+}
+
+/// Converts CLI config types to adapter config types
+fn convert_dynamic_routes_config(config: &DynamicRoutesConfig) -> AdapterDynamicRoutesConfig {
+    AdapterDynamicRoutesConfig {
+        generators: config
+            .generators
+            .iter()
+            .map(convert_router_generator_config)
+            .collect(),
+    }
+}
+
+fn convert_router_generator_config(config: &RouterGeneratorConfig) -> AdapterRouterGeneratorConfig {
+    AdapterRouterGeneratorConfig {
+        module: config.module.clone(),
+        method: config.method.clone(),
+        endpoints: config
+            .endpoints
+            .iter()
+            .map(convert_endpoint_config)
+            .collect(),
+        schema_params: config.schema_params.clone(),
+    }
+}
+
+fn convert_endpoint_config(config: &EndpointConfig) -> AdapterEndpointConfig {
+    AdapterEndpointConfig {
+        path: config.path.clone(),
+        method: config.method.clone(),
+        request_schema_param: config.request_schema_param,
+        response_schema_param: config.response_schema_param,
+    }
 }

@@ -6,6 +6,7 @@ use dc_core::call_graph::CallGraph;
 use dc_core::parsers::TypeScriptParser;
 use dc_typescript::TypeScriptCallGraphBuilder;
 use std::path::{Path, PathBuf};
+use tracing::debug;
 
 /// Builder for NestJS call graph
 pub struct NestJSCallGraphBuilder {
@@ -44,7 +45,7 @@ impl NestJSCallGraphBuilder {
         let mut graph = self.typescript_builder.build_graph()?;
 
         if self.verbose {
-            eprintln!("[DEBUG] NestJS adapter: base graph built, processing decorators...");
+            debug!("NestJS adapter: base graph built, processing decorators...");
         }
 
         // 2. Find all TypeScript files
@@ -54,9 +55,9 @@ impl NestJSCallGraphBuilder {
         }
 
         if self.verbose {
-            eprintln!(
-                "[DEBUG] NestJS adapter: found {} TypeScript files",
-                files.len()
+            debug!(
+                file_count = files.len(),
+                "NestJS adapter: found TypeScript files"
             );
         }
 
@@ -65,7 +66,11 @@ impl NestJSCallGraphBuilder {
         for file in &files {
             if let Err(err) = dto_extractor.extract_dto_classes(file) {
                 if self.verbose {
-                    eprintln!("[DEBUG] Error extracting DTOs from {:?}: {}", file, err);
+                    debug!(
+                        file_path = ?file,
+                        error = %err,
+                        "Error extracting DTOs"
+                    );
                 }
                 // Continue processing other files
             }
@@ -74,7 +79,7 @@ impl NestJSCallGraphBuilder {
         // 4. Process decorators for each file
         let parser = TypeScriptParser::new();
         let parameter_extractor = ParameterExtractor::new().with_dto_extractor(dto_extractor);
-        let mut decorator_processor = NestJSDecoratorProcessor::new(graph, self.verbose)
+        let mut decorator_processor = NestJSDecoratorProcessor::new(graph)
             .with_parameter_extractor(parameter_extractor);
 
         for file in files {
@@ -82,7 +87,11 @@ impl NestJSCallGraphBuilder {
                 Self::process_file_decorators(&parser, &mut decorator_processor, &file)
             {
                 if self.verbose {
-                    eprintln!("[DEBUG] Error processing decorators in {:?}: {}", file, err);
+                    debug!(
+                        file_path = ?file,
+                        error = %err,
+                        "Error processing decorators"
+                    );
                 }
                 // Continue processing other files
             }
@@ -92,7 +101,7 @@ impl NestJSCallGraphBuilder {
         graph = decorator_processor.into_graph();
 
         if self.verbose {
-            eprintln!("[DEBUG] NestJS adapter: decorator processing complete");
+            debug!("NestJS adapter: decorator processing complete");
         }
 
         Ok(graph)

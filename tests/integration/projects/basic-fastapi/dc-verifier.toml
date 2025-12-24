@@ -1,0 +1,24 @@
+project_name = "Basic FastAPI Example"
+entry_point = "backend/main.py"
+openapi_path = "openapi.json"
+
+[[adapters]]
+type = "fastapi"
+app_path = "backend/main.py"
+openapi_path = "openapi.json"
+
+[[adapters]]
+type = "typescript"
+src_paths = ["frontend/src"]
+openapi_path = "openapi.json"
+
+[rules]
+type_mismatch = "critical"
+missing_field = "warning"
+unnormalized_data = "info"
+
+[output]
+format = "markdown"
+path = ".chain_verification_report.md"
+
+

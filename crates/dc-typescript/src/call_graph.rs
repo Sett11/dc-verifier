@@ -7,6 +7,7 @@ use dc_core::parsers::{Call, TypeScriptParser};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use swc_ecma_ast;
+use tracing::{debug, error, warn};
 
 /// TypeScript call graph builder
 pub struct TypeScriptCallGraphBuilder {
@@ -35,6 +36,8 @@ pub struct TypeScriptCallGraphBuilder {
     /// OpenAPI linker for schema matching
     /// TODO: Use in detect_api_call to match discovered API calls with OpenAPI endpoints
     openapi_linker: Option<OpenAPILinker>,
+    /// Zod extractor for finding schema usages
+    zod_extractor: crate::zod::ZodExtractor,
 }
 
 impl TypeScriptCallGraphBuilder {
@@ -114,6 +117,7 @@ impl TypeScriptCallGraphBuilder {
             path_resolver: path_resolver::TypeScriptPathResolver::new(&project_root),
             openapi_schema: None,
             openapi_linker: None,
+            zod_extractor: crate::zod::ZodExtractor::new(),
         }
     }
 
@@ -135,12 +139,18 @@ impl TypeScriptCallGraphBuilder {
         if let Some(path) = openapi_path {
             if let Ok(schema) = OpenAPIParser::parse_file(&path) {
                 if self.verbose {
-                    eprintln!("[DEBUG] Loaded OpenAPI schema from {:?}", path);
+                    debug!(
+                        openapi_path = ?path,
+                        "Loaded OpenAPI schema"
+                    );
                 }
                 self.openapi_schema = Some(schema.clone());
                 self.openapi_linker = Some(OpenAPILinker::new(schema));
             } else if self.verbose {
-                eprintln!("[WARN] Failed to parse OpenAPI schema from {:?}", path);
+                warn!(
+                    openapi_path = ?path,
+                    "Failed to parse OpenAPI schema"
+                );
             }
         }
         self
@@ -167,7 +177,11 @@ impl TypeScriptCallGraphBuilder {
         // 3. Parse and process each file
         for file in files {
             if let Err(err) = self.process_file(&file) {
-                eprintln!("Error processing file {:?}: {}", file, err);
+                error!(
+                    file_path = ?file,
+                    error = %err,
+                    "Error processing file"
+                );
                 // Continue processing other files
             }
         }
@@ -212,9 +226,11 @@ impl TypeScriptCallGraphBuilder {
                 .extract_imports(&module, &file_path_str, &converter);
             for import in &imports {
                 if let Err(err) = self.process_import(module_node, import, &normalized) {
-                    eprintln!(
-                        "Error processing import '{}' from {:?}: {}",
-                        import.path, normalized, err
+                    warn!(
+                        import_path = %import.path,
+                        file_path = ?normalized,
+                        error = %err,
+                        "Error processing import"
                     );
                 }
             }
@@ -248,9 +264,11 @@ impl TypeScriptCallGraphBuilder {
                 .extract_calls(&module, &file_path_str, &converter, &source);
             for call in &calls {
                 if let Err(err) = self.process_call(module_node, call, &normalized) {
-                    eprintln!(
-                        "Error processing call '{}' from {:?}: {}",
-                        call.name, normalized, err
+                    warn!(
+                        call_name = %call.name,
+                        file_path = ?normalized,
+                        error = %err,
+                        "Error processing call"
                     );
                 }
             }
@@ -261,12 +279,11 @@ impl TypeScriptCallGraphBuilder {
                     if let Err(err) =
                         self.create_route_from_api_call(api_call, &normalized, &file_path_str)
                     {
-                        if self.verbose {
-                            eprintln!(
-                                "[DEBUG] Failed to create route from API call '{}': {}",
-                                call.name, err
-                            );
-                        }
+                        debug!(
+                            call_name = %call.name,
+                            error = %err,
+                            "Failed to create route from API call"
+                        );
                     }
                 }
             }
@@ -356,6 +373,40 @@ impl TypeScriptCallGraphBuilder {
                                 },
                             );
                         }
+                    }
+                }
+            }
+
+            // Extract Zod schemas and add them to graph
+            let zod_schemas = self
+                .parser
+                .extract_zod_schemas(&module, &file_path_str, &converter);
+            for zod_schema in &zod_schemas {
+                let schema_node_id = NodeId::from(self.graph.add_node(CallNode::Schema {
+                    schema: zod_schema.clone(),
+                }));
+
+                // Add edge from module to schema
+                self.graph.add_edge(
+                    *module_node,
+                    schema_node_id.0,
+                    CallEdge::Call {
+                        caller: module_node,
+                        callee: schema_node_id,
+                        argument_mapping: Vec::new(),
+                        location: zod_schema.location.clone(),
+                    },
+                );
+            }
+
+            // Link Zod schemas to their usage and API calls
+            if !zod_schemas.is_empty() {
+                if let Err(e) = self.link_zod_schemas_to_usage(&normalized, &zod_schemas) {
+                    if self.verbose {
+                        debug!(
+                            error = %e,
+                            "Failed to link Zod schemas to usage"
+                        );
                     }
                 }
             }
@@ -537,9 +588,10 @@ impl TypeScriptCallGraphBuilder {
         let (module, source, converter) = match self.parser.parse_file(source_file) {
             Ok(result) => result,
             Err(_) => {
-                if self.verbose {
-                    eprintln!("[DEBUG] Failed to parse SDK file: {:?}", source_file);
-                }
+                debug!(
+                    source_file = ?source_file,
+                    "Failed to parse SDK file"
+                );
                 self.sdk_function_cache
                     .insert(function_name.to_string(), None);
                 return None;
@@ -557,9 +609,10 @@ impl TypeScriptCallGraphBuilder {
             Some(info) => info,
             None => {
                 if self.verbose {
-                    eprintln!(
-                        "[DEBUG] Function '{}' not found in {:?}",
-                        function_name, source_file
+                    debug!(
+                        function_name = %function_name,
+                        source_file = ?source_file,
+                        "Function not found"
                     );
                 }
                 self.sdk_function_cache
@@ -567,6 +620,27 @@ impl TypeScriptCallGraphBuilder {
                 return None;
             }
         };
+
+        // If we have an OpenAPI linker, try to resolve the API call purely by operationId
+        // (function name) before doing any heuristic source scanning. This helps when
+        // the URL or HTTP method are not easily recoverable from generated SDK code.
+        if let Some(linker) = &self.openapi_linker {
+            if let Some(endpoint) = linker.find_endpoint_by_operation_id(function_name) {
+                if let Some(method) = Self::http_method_from_str(&endpoint.method) {
+                    let api_info = Some(ApiCallInfo {
+                        path: endpoint.path.clone(),
+                        method,
+                        location: function_info.location.clone(),
+                        request_type: None,
+                        response_type: None,
+                    });
+
+                    self.sdk_function_cache
+                        .insert(function_name.to_string(), api_info.clone());
+                    return api_info;
+                }
+            }
+        }
 
         // Analyze function body to find client.get/post/delete calls
         // We need to parse the source code to find the pattern:
@@ -578,6 +652,20 @@ impl TypeScriptCallGraphBuilder {
             .insert(function_name.to_string(), api_info.clone());
 
         api_info
+    }
+
+    /// Converts lowercase HTTP method string to HttpMethod
+    fn http_method_from_str(method: &str) -> Option<HttpMethod> {
+        match method.to_lowercase().as_str() {
+            "get" => Some(HttpMethod::Get),
+            "post" => Some(HttpMethod::Post),
+            "put" => Some(HttpMethod::Put),
+            "patch" => Some(HttpMethod::Patch),
+            "delete" => Some(HttpMethod::Delete),
+            "options" => Some(HttpMethod::Options),
+            "head" => Some(HttpMethod::Head),
+            _ => None,
+        }
     }
 
     /// Extracts API call information from SDK function source code
@@ -1288,12 +1376,60 @@ impl TypeScriptCallGraphBuilder {
         };
         let location = api_call.location.clone();
 
+        // Create initial Route node for this API call
         let route_node = NodeId::from(self.graph.add_node(CallNode::Route {
-            path: api_call.path,
+            path: api_call.path.clone(),
             method: api_call.method,
             handler: handler_node,
             location: location.clone(),
+            request_schema: None,
+            response_schema: None,
         }));
+
+        // If we have an OpenAPI linker, try to match this route to an OpenAPI endpoint
+        // and enrich Route node with request/response schemas from OpenAPI.
+        if let Some(linker) = &self.openapi_linker {
+            if let Some(endpoint) = linker.match_route_to_endpoint(&api_call.path, api_call.method)
+            {
+                // Update existing Route node in the graph with OpenAPI schema references
+                if let Some(call_node) = self.graph.node_weight_mut(route_node.0) {
+                    if let CallNode::Route {
+                        request_schema,
+                        response_schema,
+                        ..
+                    } = call_node
+                    {
+                        // Request schema from OpenAPI (if any)
+                        if let Some(ref schema_name) = endpoint.request_schema {
+                            *request_schema = Some(dc_core::models::SchemaReference {
+                                name: schema_name.clone(),
+                                schema_type: dc_core::models::SchemaType::OpenAPI,
+                                location: Location {
+                                    file: format!("openapi://{}", schema_name),
+                                    line: 0,
+                                    column: None,
+                                },
+                                metadata: std::collections::HashMap::new(),
+                            });
+                        }
+
+                        // Response schema from OpenAPI (if any)
+                        if let Some(ref schema_name) = endpoint.response_schema {
+                            *response_schema = Some(dc_core::models::SchemaReference {
+                                name: schema_name.clone(),
+                                schema_type: dc_core::models::SchemaType::OpenAPI,
+                                location: Location {
+                                    file: format!("openapi://{}", schema_name),
+                                    line: 0,
+                                    column: None,
+                                },
+                                metadata: std::collections::HashMap::new(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
 
         // Link route to handler
         self.graph.add_edge(
@@ -1484,12 +1620,11 @@ impl TypeScriptCallGraphBuilder {
             if let Some(stem) = candidate.file_stem().and_then(|s| s.to_str()) {
                 with_gen_ext.set_file_name(format!("{}.{}", stem, gen_ext));
                 if with_gen_ext.exists() {
-                    if self.verbose {
-                        eprintln!(
-                            "[DEBUG] Resolved import '{}' to generated file {:?}",
-                            import_path, with_gen_ext
-                        );
-                    }
+                    debug!(
+                        import_path = %import_path,
+                        resolved_path = ?with_gen_ext,
+                        "Resolved import to generated file"
+                    );
                     return Ok(with_gen_ext);
                 }
             }
@@ -1507,12 +1642,11 @@ impl TypeScriptCallGraphBuilder {
             for gen_index in &["index.gen.ts", "index.gen.tsx"] {
                 let gen_index_path = candidate.join(gen_index);
                 if gen_index_path.exists() {
-                    if self.verbose {
-                        eprintln!(
-                            "[DEBUG] Resolved import '{}' to generated index file {:?}",
-                            import_path, gen_index_path
-                        );
-                    }
+                    debug!(
+                        import_path = %import_path,
+                        resolved_path = ?gen_index_path,
+                        "Resolved import to generated index file"
+                    );
                     return Ok(gen_index_path);
                 }
             }
@@ -1909,9 +2043,10 @@ impl TypeScriptCallGraphBuilder {
     ) {
         // Check recursion depth limit
         if depth >= Self::MAX_REEXPORT_DEPTH {
-            if self.verbose {
-                eprintln!("[DEBUG] Max re-export depth reached for {:?}", file_path);
-            }
+            debug!(
+                file_path = ?file_path,
+                "Max re-export depth reached"
+            );
             return;
         }
 
@@ -1940,7 +2075,7 @@ impl TypeScriptCallGraphBuilder {
         // Check recursion depth limit
         if depth >= Self::MAX_REEXPORT_DEPTH {
             if self.verbose {
-                eprintln!("[DEBUG] Max re-export depth reached in track_export_all_sdk_functions");
+                debug!("Max re-export depth reached in track_export_all_sdk_functions");
             }
             return;
         }
@@ -1950,7 +2085,19 @@ impl TypeScriptCallGraphBuilder {
                 export_all,
             )) = item
             {
-                let export_path = export_all.src.value.as_str().unwrap_or("").to_string();
+                let export_path = export_all
+                    .src
+                    .value
+                    .as_str()
+                    .unwrap_or_else(|| {
+                        warn!(
+                            file_path = ?current_file,
+                            span = ?export_all.src.span,
+                            "Failed to extract export path, using empty string"
+                        );
+                        ""
+                    })
+                    .to_string();
                 if let Ok(export_file_path) = self.resolve_import_path(&export_path, current_file) {
                     if self.is_sdk_file(&export_file_path) {
                         // Find all exported functions from this SDK file
@@ -1971,12 +2118,11 @@ impl TypeScriptCallGraphBuilder {
                                     let name_clone = name.clone();
                                     self.imported_functions
                                         .insert(name, export_file_path.clone());
-                                    if self.verbose {
-                                        eprintln!(
-                                            "[DEBUG] Tracked SDK function '{}' from {:?}",
-                                            name_clone, export_file_path
-                                        );
-                                    }
+                                    debug!(
+                                        function_name = %name_clone,
+                                        export_file_path = ?export_file_path,
+                                        "Tracked SDK function"
+                                    );
                                 }
                             }
                         }
@@ -1991,6 +2137,139 @@ impl TypeScriptCallGraphBuilder {
                 }
             }
         }
+    }
+
+    /// Finds API call that follows Zod schema usage
+    /// Looks for API calls in the same function or nearby statements
+    fn find_api_call_after_zod_usage(
+        &mut self,
+        zod_usage: &dc_core::models::ZodUsage,
+        calls: &[Call],
+    ) -> Option<ApiCallInfo> {
+        // Find calls that are in the same file and after the Zod usage
+        let mut candidate_calls = Vec::new();
+
+        for call in calls {
+            // Check if call is in the same file
+            if call.location.file == zod_usage.location.file {
+                // Check if call is after Zod usage (same or later line)
+                if call.location.line >= zod_usage.location.line {
+                    // Check if this is an API call by examining the call name and structure
+                    // We'll do a simple check here instead of calling detect_api_call
+                    // to avoid mutable borrow issues
+                    let is_api_call = call.name == "fetch"
+                        || call.name.starts_with("axios.")
+                        || call.name.starts_with("api.")
+                        || call.name.starts_with("client.")
+                        || call.name.starts_with("http.")
+                        || call.name.starts_with("request.")
+                        || call.name.contains(".useQuery")
+                        || call.name.contains(".useMutation")
+                        || call.name.starts_with("actions.");
+
+                    if is_api_call {
+                        // Try to extract API call info
+                        if let Some(api_call) = self.detect_api_call(call) {
+                            candidate_calls.push((call.location.line, api_call));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Return the closest API call (smallest line difference)
+        candidate_calls
+            .into_iter()
+            .min_by_key(|(line, _)| line - zod_usage.location.line)
+            .map(|(_, api_call)| api_call)
+    }
+
+    /// Finds schema node by name and type
+    fn find_schema_node(
+        &self,
+        schema_name: &str,
+        schema_type: dc_core::models::SchemaType,
+    ) -> Option<NodeId> {
+        self.graph
+            .node_indices()
+            .find(|&node_id| {
+                if let Some(node) = self.graph.node_weight(node_id) {
+                    if let CallNode::Schema { schema: schema_ref } = node {
+                        return schema_ref.name == schema_name
+                            && schema_ref.schema_type == schema_type;
+                    }
+                }
+                false
+            })
+            .map(NodeId::from)
+    }
+
+    /// Links Zod schemas to their usage and API calls
+    fn link_zod_schemas_to_usage(
+        &mut self,
+        file_path: &Path,
+        zod_schemas: &[dc_core::models::SchemaReference],
+    ) -> Result<()> {
+        let file_path_str = file_path.to_string_lossy().to_string();
+
+        // Parse the file to get module
+        let (module, source, converter) = self.parser.parse_file(file_path)?;
+
+        // Extract all calls from the file
+        let calls = self
+            .parser
+            .extract_calls(&module, &file_path_str, &converter, &source);
+
+        // For each Zod schema, find its usage
+        for zod_schema in zod_schemas {
+            let usages = self.zod_extractor.find_zod_schema_usage(
+                &zod_schema.name,
+                &module,
+                &file_path_str,
+                &converter,
+            );
+
+            for mut usage in usages {
+                // Try to find associated API call
+                if let Some(api_call) = self.find_api_call_after_zod_usage(&usage, &calls) {
+                    usage.api_call_location = Some(api_call.location.clone());
+
+                    // Store usage in metadata
+                    if let Some(zod_node_id) =
+                        self.find_schema_node(&zod_schema.name, dc_core::models::SchemaType::Zod)
+                    {
+                        // Get the schema node and update it
+                        if let Some(CallNode::Schema {
+                            schema: mut schema_ref,
+                        }) = self.graph.node_weight(zod_node_id.0).cloned()
+                        {
+                            // Store usages as JSON in metadata
+                            let existing_usages: Vec<dc_core::models::ZodUsage> = schema_ref
+                                .metadata
+                                .get("usages")
+                                .and_then(|s| serde_json::from_str(s).ok())
+                                .unwrap_or_default();
+
+                            let mut updated_usages = existing_usages;
+                            updated_usages.push(usage);
+
+                            if let Ok(usages_json) = serde_json::to_string(&updated_usages) {
+                                schema_ref
+                                    .metadata
+                                    .insert("usages".to_string(), usages_json);
+
+                                // Replace the node with updated schema
+                                *self.graph.node_weight_mut(zod_node_id.0).ok_or_else(|| {
+                                    anyhow::anyhow!("Zod schema node not found")
+                                })? = CallNode::Schema { schema: schema_ref };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

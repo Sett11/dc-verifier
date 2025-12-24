@@ -1,6 +1,7 @@
 use crate::openapi::schema::*;
 use anyhow::{Context, Result};
 use serde_json;
+use serde_yaml;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -8,18 +9,82 @@ use std::path::Path;
 pub struct OpenAPIParser;
 
 impl OpenAPIParser {
-    /// Parses an OpenAPI JSON file
+    /// Parses an OpenAPI file (JSON or YAML)
     pub fn parse_file(openapi_path: &Path) -> Result<OpenAPISchema> {
         let content = std::fs::read_to_string(openapi_path)
             .with_context(|| format!("Failed to read OpenAPI file: {:?}", openapi_path))?;
 
-        Self::parse_str(&content)
+        // Определить формат по расширению файла
+        let extension = openapi_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+
+        match extension {
+            "yaml" | "yml" => Self::parse_yaml_str(&content),
+            "json" => Self::parse_json_str(&content),
+            _ => {
+                // Попробовать определить по содержимому
+                let trimmed = content.trim_start();
+                if trimmed.starts_with('{') {
+                    // JSON начинается с {
+                    Self::parse_json_str(&content)
+                } else if trimmed.starts_with("---")
+                    || trimmed.starts_with("openapi:")
+                    || trimmed.starts_with("swagger:")
+                {
+                    // YAML может начинаться с --- или с openapi:/swagger:
+                    Self::parse_yaml_str(&content)
+                } else {
+                    // По умолчанию попробовать JSON, затем YAML
+                    Self::parse_json_str(&content)
+                        .or_else(|_| Self::parse_yaml_str(&content))
+                        .with_context(|| {
+                            format!(
+                                "Failed to parse OpenAPI file: {:?}. Tried both JSON and YAML formats.",
+                                openapi_path
+                            )
+                        })
+                }
+            }
+        }
+    }
+
+    /// Parses an OpenAPI string (JSON or YAML)
+    /// Automatically detects format by content
+    pub fn parse_str(content: &str) -> Result<OpenAPISchema> {
+        let trimmed = content.trim_start();
+
+        // Определить формат по содержимому
+        if trimmed.starts_with('{') {
+            // JSON начинается с {
+            Self::parse_json_str(content)
+        } else if trimmed.starts_with("---")
+            || trimmed.starts_with("openapi:")
+            || trimmed.starts_with("swagger:")
+        {
+            // YAML может начинаться с --- или с openapi:/swagger:
+            Self::parse_yaml_str(content)
+        } else {
+            // По умолчанию попробовать JSON, затем YAML
+            Self::parse_json_str(content)
+                .or_else(|_| Self::parse_yaml_str(content))
+                .context("Failed to parse OpenAPI string. Tried both JSON and YAML formats.")
+        }
     }
 
     /// Parses an OpenAPI JSON string
-    pub fn parse_str(content: &str) -> Result<OpenAPISchema> {
+    fn parse_json_str(content: &str) -> Result<OpenAPISchema> {
         let schema: OpenAPISchema =
             serde_json::from_str(content).context("Failed to parse OpenAPI JSON")?;
+
+        Ok(schema)
+    }
+
+    /// Parses an OpenAPI YAML string
+    fn parse_yaml_str(content: &str) -> Result<OpenAPISchema> {
+        let schema: OpenAPISchema =
+            serde_yaml::from_str(content).context("Failed to parse OpenAPI YAML")?;
 
         Ok(schema)
     }
@@ -125,23 +190,42 @@ impl OpenAPIParser {
     }
 
     /// Extracts all schema components from an OpenAPI schema
+    /// Resolves $ref references to include referenced schemas
     pub fn extract_schemas(schema: &OpenAPISchema) -> HashMap<String, OpenAPISchemaComponent> {
         let mut schemas = HashMap::new();
 
         if let Some(components) = &schema.components {
             if let Some(schema_map) = &components.schemas {
                 for (name, schema_ref) in schema_map {
-                    if let SchemaRef::Inline(s) = schema_ref {
-                        let properties = Self::extract_schema_properties(schema_ref);
-                        schemas.insert(
-                            name.clone(),
-                            OpenAPISchemaComponent {
-                                name: name.clone(),
-                                schema: (**s).clone(),
-                                properties,
-                            },
-                        );
-                    }
+                    let mut visited = std::collections::HashSet::new();
+                    let properties =
+                        Self::extract_schema_properties(schema_ref, schema, &mut visited);
+
+                    // Handle both inline and reference schemas
+                    let mut resolve_visited = std::collections::HashSet::new();
+                    let resolved_schema = match schema_ref {
+                        SchemaRef::Ref(reference) => {
+                            // Resolve the reference
+                            if let Some(resolved) =
+                                Self::resolve_ref(schema, &reference.ref_path, &mut resolve_visited)
+                            {
+                                resolved.schema
+                            } else {
+                                // If resolution fails, skip this schema
+                                continue;
+                            }
+                        }
+                        SchemaRef::Inline(s) => (**s).clone(),
+                    };
+
+                    schemas.insert(
+                        name.clone(),
+                        OpenAPISchemaComponent {
+                            name: name.clone(),
+                            schema: resolved_schema,
+                            properties,
+                        },
+                    );
                 }
             }
         }
@@ -149,22 +233,55 @@ impl OpenAPIParser {
         schemas
     }
 
-    /// Extracts properties from a schema
-    fn extract_schema_properties(schema_ref: &SchemaRef) -> Vec<(String, String)> {
+    /// Extracts properties from a schema, resolving $ref references recursively
+    fn extract_schema_properties(
+        schema_ref: &SchemaRef,
+        schema: &OpenAPISchema,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> Vec<(String, String)> {
         let mut properties = Vec::new();
 
         match schema_ref {
-            SchemaRef::Ref(_) => {
-                // Can't extract properties from a reference without resolving it
+            SchemaRef::Ref(reference) => {
+                // Resolve the reference
+                let ref_path = &reference.ref_path;
+
+                // Check for circular references
+                if visited.contains(ref_path) {
+                    // Circular reference detected, skip to avoid infinite loop
+                    return properties;
+                }
+
+                visited.insert(ref_path.clone());
+
+                // Resolve the reference
+                let mut resolve_visited = visited.clone();
+                if let Some(resolved_component) =
+                    Self::resolve_ref(schema, ref_path, &mut resolve_visited)
+                {
+                    // Recursively extract properties from resolved schema
+                    let resolved_schema_ref =
+                        SchemaRef::Inline(Box::new(resolved_component.schema));
+                    properties.extend(Self::extract_schema_properties(
+                        &resolved_schema_ref,
+                        schema,
+                        visited,
+                    ));
+                }
+
+                visited.remove(ref_path);
             }
-            SchemaRef::Inline(schema) => {
-                match schema.as_ref() {
+            SchemaRef::Inline(inline_schema) => {
+                match inline_schema.as_ref() {
                     Schema::Object(obj) => {
                         if let Some(props) = &obj.properties {
                             for (prop_name, prop_schema) in props {
                                 let prop_type = Self::extract_schema_name(prop_schema)
                                     .unwrap_or_else(|| "unknown".to_string());
                                 properties.push((prop_name.clone(), prop_type));
+
+                                // If property is a reference, we don't need to extract nested properties
+                                // as we're only tracking property names and types, not full nested structures
                             }
                         }
                     }
@@ -178,7 +295,9 @@ impl OpenAPIParser {
                     Schema::AllOf(all) => {
                         // Extract properties from all schemas in allOf
                         for schema_ref in &all.all_of {
-                            properties.extend(Self::extract_schema_properties(schema_ref));
+                            properties.extend(Self::extract_schema_properties(
+                                schema_ref, schema, visited,
+                            ));
                         }
                     }
                     Schema::OneOf(_) | Schema::AnyOf(_) | Schema::Primitive(_) => {
@@ -220,11 +339,113 @@ impl OpenAPIParser {
             })
     }
 
+    /// Gets a schema component by name directly from components
+    /// This method works directly with the schema components without resolving references
+    fn get_schema_component_direct<'a>(
+        schema: &'a OpenAPISchema,
+        schema_name: &str,
+    ) -> Option<&'a SchemaRef> {
+        schema
+            .components
+            .as_ref()?
+            .schemas
+            .as_ref()?
+            .get(schema_name)
+    }
+
     /// Gets a schema component by name
     pub fn get_schema_component(
         schema: &OpenAPISchema,
         schema_name: &str,
     ) -> Option<OpenAPISchemaComponent> {
-        Self::extract_schemas(schema).get(schema_name).cloned()
+        // First try to get the schema directly
+        if let Some(schema_ref) = Self::get_schema_component_direct(schema, schema_name) {
+            let mut visited = std::collections::HashSet::new();
+            let properties = Self::extract_schema_properties(schema_ref, schema, &mut visited);
+
+            let mut resolve_visited = std::collections::HashSet::new();
+            let resolved_schema = match schema_ref {
+                SchemaRef::Ref(reference) => {
+                    // Resolve the reference recursively
+                    if let Some(resolved) =
+                        Self::resolve_ref(schema, &reference.ref_path, &mut resolve_visited)
+                    {
+                        resolved.schema
+                    } else {
+                        // If resolution fails, return None
+                        return None;
+                    }
+                }
+                SchemaRef::Inline(s) => (**s).clone(),
+            };
+
+            return Some(OpenAPISchemaComponent {
+                name: schema_name.to_string(),
+                schema: resolved_schema,
+                properties,
+            });
+        }
+
+        None
+    }
+
+    /// Resolves a $ref reference to an OpenAPISchemaComponent
+    /// Supports internal references: #/components/schemas/Name
+    /// Returns None for external references (not yet supported)
+    fn resolve_ref(
+        schema: &OpenAPISchema,
+        ref_path: &str,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> Option<OpenAPISchemaComponent> {
+        // Check for circular references
+        if visited.contains(ref_path) {
+            // Circular reference detected, return None to avoid infinite loop
+            return None;
+        }
+
+        // Handle internal references to components/schemas
+        if ref_path.starts_with("#/components/schemas/") {
+            let schema_name = ref_path.trim_start_matches("#/components/schemas/");
+
+            visited.insert(ref_path.to_string());
+
+            // Get the schema reference directly
+            if let Some(schema_ref) = Self::get_schema_component_direct(schema, schema_name) {
+                let mut props_visited = visited.clone();
+                let properties =
+                    Self::extract_schema_properties(schema_ref, schema, &mut props_visited);
+
+                let resolved_schema = match schema_ref {
+                    SchemaRef::Ref(reference) => {
+                        // Recursively resolve nested references
+                        if let Some(resolved) =
+                            Self::resolve_ref(schema, &reference.ref_path, visited)
+                        {
+                            resolved.schema
+                        } else {
+                            visited.remove(ref_path);
+                            return None;
+                        }
+                    }
+                    SchemaRef::Inline(s) => (**s).clone(),
+                };
+
+                visited.remove(ref_path);
+
+                return Some(OpenAPISchemaComponent {
+                    name: schema_name.to_string(),
+                    schema: resolved_schema,
+                    properties,
+                });
+            }
+
+            visited.remove(ref_path);
+        }
+
+        // TODO: Handle #/components/parameters/... (future enhancement)
+        // TODO: Handle #/components/responses/... (future enhancement)
+        // TODO: Handle external references (http://, file://) (future enhancement)
+
+        None
     }
 }

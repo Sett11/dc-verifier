@@ -259,6 +259,11 @@ missing_field = "warning"       # Missing field checking (critical/warning/info)
 unnormalized_data = "warning"  # Data normalization checking (critical/warning/info)
 ```
 
+## Tests
+
+- **Run all tests**: `cargo test --all`
+- **More details**: see `TESTING.md` for an overview of unit, integration and regression tests (FastAPI/Pydantic/SQLAlchemy, TypeScript/Zod/OpenAPI, imports, reporters).
+
 These rules are used to determine severity in contracts and affect the final statistics in reports.
 
 ## OpenAPI Integration
@@ -554,5 +559,4 @@ The project is open for contributions! See details in [CONTRIBUTING.md](CONTRIBU
 
 **Important:** When adding new features or modifying existing ones, please update:
 - `README.md` - feature descriptions and usage examples
-- `AUDIT_REPORT.md` - detailed implementation information
 - `CHANGELOG.md` - change history in Keep a Changelog format

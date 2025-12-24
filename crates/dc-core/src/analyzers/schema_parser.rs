@@ -45,6 +45,7 @@ impl SchemaParser {
             SchemaType::TypeScript => Self::parse_typescript(schema_ref),
             SchemaType::OpenAPI => Self::parse_openapi(schema_ref),
             SchemaType::JsonSchema => Self::parse_json_schema(schema_ref),
+            SchemaType::OrmModel => Self::parse_orm_model(schema_ref),
         }
     }
 
@@ -80,33 +81,56 @@ impl SchemaParser {
 
         // Try to extract information from metadata
         if let Some(fields_str) = schema_ref.metadata.get("fields") {
-            // Parse fields from metadata: split only by first ':'
-            for field in fields_str.split(',') {
-                let field = field.trim();
-                if field.is_empty() {
-                    continue;
+            // First, try to parse as JSON (new format)
+            if let Ok(fields) =
+                serde_json::from_str::<Vec<crate::models::PydanticFieldInfo>>(fields_str)
+            {
+                for field in fields {
+                    // Convert PydanticFieldInfo to FieldInfo for JsonSchema
+                    let field_info = FieldInfo {
+                        field_type: field.type_name.clone(),
+                        base_type: Self::map_pydantic_type_to_base_type(&field.type_name),
+                        optional: field.optional,
+                        constraints: field
+                            .constraints
+                            .iter()
+                            .map(Self::convert_field_constraint)
+                            .collect(),
+                        nested_schema: None, // Can be enhanced later
+                    };
+                    properties.insert(field.name.clone(), field_info);
                 }
-
-                // Split only by first ':'
-                if let Some(colon_pos) = field.find(':') {
-                    let name = field[..colon_pos].trim().to_string();
-                    let field_type = field[colon_pos + 1..].trim().to_string();
-
-                    // Skip empty names or types
-                    if name.is_empty() || field_type.is_empty() {
+            } else {
+                // Fallback: parse old string format
+                // Parse fields from metadata: split only by first ':'
+                for field in fields_str.split(',') {
+                    let field = field.trim();
+                    if field.is_empty() {
                         continue;
                     }
 
-                    properties.insert(
-                        name.clone(),
-                        FieldInfo {
-                            field_type: field_type.clone(),
-                            base_type: Self::base_type_from_string(&field_type),
-                            optional: true, // By default fields are optional
-                            constraints: Vec::new(),
-                            nested_schema: None,
-                        },
-                    );
+                    // Split only by first ':'
+                    if let Some(colon_pos) = field.find(':') {
+                        let name = field[..colon_pos].trim().to_string();
+                        let field_type = field[colon_pos + 1..].trim().to_string();
+
+                        // Skip empty names or types
+                        if name.is_empty() || field_type.is_empty() {
+                            continue;
+                        }
+
+                        let base_type = Self::base_type_from_string(&field_type);
+                        properties.insert(
+                            name,
+                            FieldInfo {
+                                field_type,
+                                base_type,
+                                optional: true, // By default fields are optional
+                                constraints: Vec::new(),
+                                nested_schema: None,
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -233,6 +257,58 @@ impl SchemaParser {
             items: None,
             constraints: Vec::new(),
         })
+    }
+
+    /// Parses ORM model schema
+    fn parse_orm_model(schema_ref: &SchemaReference) -> Result<JsonSchema> {
+        let mut properties = HashMap::new();
+        let mut required = Vec::new();
+
+        // Extract ORM fields from metadata
+        if let Some(fields_json) = schema_ref.metadata.get("fields") {
+            if let Ok(fields) =
+                serde_json::from_str::<Vec<crate::models::SQLAlchemyField>>(fields_json)
+            {
+                for field in fields {
+                    // Convert SQLAlchemyField to FieldInfo for JsonSchema
+                    let base_type = Self::map_sqlalchemy_type_to_base_type(&field.type_name);
+                    let field_info = FieldInfo {
+                        field_type: field.type_name.clone(),
+                        base_type,
+                        optional: field.nullable,
+                        constraints: Vec::new(),
+                        nested_schema: None,
+                    };
+                    properties.insert(field.name.clone(), field_info);
+
+                    // If field is not nullable, it's required
+                    if !field.nullable {
+                        required.push(field.name);
+                    }
+                }
+            }
+        }
+
+        Ok(JsonSchema {
+            schema_type: "object".to_string(),
+            properties,
+            required,
+            items: None,
+            constraints: Vec::new(),
+        })
+    }
+
+    /// Maps SQLAlchemy type name to BaseType
+    fn map_sqlalchemy_type_to_base_type(type_name: &str) -> BaseType {
+        let type_lower = type_name.to_lowercase();
+        match type_lower.as_str() {
+            "integer" | "int" | "bigint" | "smallint" => BaseType::Integer,
+            "string" | "str" | "text" | "varchar" | "char" => BaseType::String,
+            "float" | "double" | "numeric" | "decimal" | "real" => BaseType::Number,
+            "boolean" | "bool" => BaseType::Boolean,
+            "json" | "jsonb" => BaseType::Object,
+            _ => BaseType::Unknown,
+        }
     }
 
     /// Parses OpenAPI schema
@@ -387,6 +463,53 @@ impl SchemaParser {
             "dict" | "object" => BaseType::Object,
             "null" | "none" => BaseType::Null,
             _ => BaseType::Unknown,
+        }
+    }
+
+    /// Maps Pydantic type name to BaseType
+    fn map_pydantic_type_to_base_type(type_name: &str) -> BaseType {
+        // Handle generic types like Optional[T], list[T], etc.
+        let type_lower = type_name.to_lowercase();
+        if type_lower.starts_with("optional[") || type_lower.starts_with("union[") {
+            // Extract inner type from Optional[T] or Union[T1, T2]
+            // For simplicity, just check if it contains array/list
+            if type_lower.contains("array") || type_lower.contains("list") {
+                return BaseType::Array;
+            }
+            // Otherwise, try to extract the base type
+            if let Some(start) = type_lower.find('[') {
+                if let Some(end) = type_lower.rfind(']') {
+                    let inner = &type_lower[start + 1..end].trim();
+                    return Self::base_type_from_string(inner);
+                }
+            }
+        }
+        if type_lower == "array" {
+            return BaseType::Array;
+        }
+        Self::base_type_from_string(type_name)
+    }
+
+    /// Converts FieldConstraint to Constraint
+    fn convert_field_constraint(fc: &crate::models::FieldConstraint) -> Constraint {
+        match fc {
+            crate::models::FieldConstraint::MinLength(val) => {
+                Constraint::Min(ConstraintValue::Integer(*val as i64))
+            }
+            crate::models::FieldConstraint::MaxLength(val) => {
+                Constraint::Max(ConstraintValue::Integer(*val as i64))
+            }
+            crate::models::FieldConstraint::MinValue(val) => {
+                Constraint::Min(ConstraintValue::Float(*val))
+            }
+            crate::models::FieldConstraint::MaxValue(val) => {
+                Constraint::Max(ConstraintValue::Float(*val))
+            }
+            crate::models::FieldConstraint::Pattern(pattern) => {
+                Constraint::Pattern(pattern.clone())
+            }
+            crate::models::FieldConstraint::Email => Constraint::Email,
+            crate::models::FieldConstraint::Url => Constraint::Url,
         }
     }
 }

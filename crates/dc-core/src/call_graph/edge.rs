@@ -1,4 +1,4 @@
-use crate::models::NodeId;
+use crate::models::{Location, NodeId, SchemaReference, TransformationType};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -35,5 +35,20 @@ pub enum CallEdge {
         to: NodeId,
         /// Return variable name
         return_value: String,
+    },
+    /// Data flow between schemas (e.g., Pydantic ↔ ORM)
+    DataFlow {
+        /// Source node (e.g., Pydantic model)
+        from: NodeId,
+        /// Target node (e.g., ORM model)
+        to: NodeId,
+        /// Source schema reference
+        from_schema: SchemaReference,
+        /// Target schema reference
+        to_schema: Box<SchemaReference>,
+        /// Location in code where transformation occurs
+        location: Location,
+        /// Type of transformation (e.g., FromDict, ToJson, OrmToPydantic, etc.)
+        transformation: Option<TransformationType>,
     },
 }

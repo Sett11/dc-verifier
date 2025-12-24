@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 /// Resolves TypeScript path mappings from tsconfig.json
 pub struct TypeScriptPathResolver {
@@ -26,7 +27,10 @@ impl TypeScriptPathResolver {
         if let Err(err) = resolver.load_tsconfig(project_root) {
             // Silently fail if tsconfig.json is not found or invalid
             // This is expected for projects without TypeScript configuration
-            eprintln!("[WARN] Could not load tsconfig.json: {}", err);
+            warn!(
+                error = %err,
+                "Could not load tsconfig.json"
+            );
         }
 
         resolver
@@ -117,9 +121,10 @@ impl TypeScriptPathResolver {
             if let Err(err) = self.load_tsconfig_recursive(project_root, &base_config_dir, visited)
             {
                 // Log warning but continue
-                eprintln!(
-                    "[WARN] Failed to load extended config from {:?}: {}",
-                    extends_path_for_error, err
+                warn!(
+                    extends_path = ?extends_path_for_error,
+                    error = %err,
+                    "Failed to load extended config"
                 );
             }
         }

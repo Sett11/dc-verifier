@@ -17,5 +17,4 @@ unnormalized_data = "info"
 [output]
 format = "markdown"
 path = ".chain_verification_report.md"
-include_line_numbers = true
 

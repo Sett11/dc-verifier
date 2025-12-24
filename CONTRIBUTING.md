@@ -8,12 +8,11 @@ Thank you for your interest in contributing to dc-verifier (Data Chains Verifier
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
 3. Make your changes
 4. **Format code** (`cargo fmt`)
-5. **Check for linting issues** (`cargo clippy --all`)
+5. **Check for linting issues** (`cargo clippy --all-targets --all-features -- -D warnings`)
 6. **Ensure code compiles without warnings** (`cargo check --all`)
 7. **Ensure all tests pass** (`cargo test --all`)
 8. **Update documentation** if adding new features:
    - Update `README.md` with new capabilities and examples
-   - Update `AUDIT_REPORT.md` with implementation details
    - Update `CHANGELOG.md` in the `[Unreleased]` section
 9. Commit your changes (`git commit -m 'Add amazing feature'`)
 10. Push to the branch (`git push origin feature/amazing-feature`)
@@ -36,7 +35,6 @@ Thank you for your interest in contributing to dc-verifier (Data Chains Verifier
 - Use standard Rust doc comment format
 - **When adding new features**, update:
   - `README.md` - add to "Features" section and examples
-  - `AUDIT_REPORT.md` - add implementation details in relevant sections
   - `CHANGELOG.md` - add entry in `[Unreleased]` section under appropriate category (Added/Changed/Fixed)
 
 ## Local Development with Docker
@@ -128,7 +126,6 @@ To add support for a new language/framework:
 7. Update documentation:
    - Add adapter description to `README.md`
    - Add configuration example to `README.md`
-   - Document implementation in `AUDIT_REPORT.md`
    - Add entry to `CHANGELOG.md`
 8. Update `dc-cli/src/config.rs`:
    - Add adapter type validation in `Config::validate()`
@@ -160,7 +157,7 @@ To add support for a new language/framework:
 3. Maintainers will review for:
    - Code quality and adherence to standards
    - Test coverage (unit and integration tests)
-   - Documentation completeness (README, AUDIT_REPORT, CHANGELOG)
+   - Documentation completeness (README, CHANGELOG)
    - Performance considerations
    - Proper use of progress bars for long operations
    - Configuration validation and error handling

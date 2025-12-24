@@ -112,6 +112,8 @@ impl ContractRule for MissingFieldRule {
         // Also check fields that exist in to_schema but are missing in from_schema
         // (if they are not optional)
         for (field_name, to_field) in &to_schema.properties {
+            // Additional check: ensure field is not already in required list
+            // This prevents duplicate mismatches for the same field
             if !to_field.optional
                 && !from_schema.properties.contains_key(field_name)
                 && !to_schema.required.contains(field_name)

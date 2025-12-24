@@ -1,4 +1,4 @@
-use crate::models::{Location, NodeId, TypeInfo};
+use crate::models::{Location, NodeId, SchemaReference, TypeInfo};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -53,6 +53,15 @@ pub enum CallNode {
         handler: NodeId,
         /// Location in code
         location: Location,
+        /// Request body schema (if any)
+        request_schema: Option<SchemaReference>,
+        /// Response schema (if any)
+        response_schema: Option<SchemaReference>,
+    },
+    /// Schema (Pydantic, Zod, TypeScript, OpenAPI, etc.)
+    Schema {
+        /// Schema reference
+        schema: SchemaReference,
     },
 }
 
