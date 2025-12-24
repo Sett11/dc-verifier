@@ -251,7 +251,7 @@ impl OpenAPILinker {
             if !pydantic_fields.is_empty() {
                 // Extract threshold to named constant
                 const FIELD_MATCH_THRESHOLD: f64 = 0.7;
-                
+
                 let mut candidates: Vec<(&OpenAPISchemaComponent, f64)> = Vec::new();
                 let threshold = FIELD_MATCH_THRESHOLD;
 
@@ -266,36 +266,34 @@ impl OpenAPILinker {
 
                 if !candidates.is_empty() {
                     // Find max score
-                    let max_score = candidates.iter().map(|(_, score)| *score).fold(0.0, f64::max);
-                    
+                    let max_score = candidates
+                        .iter()
+                        .map(|(_, score)| *score)
+                        .fold(0.0, f64::max);
+
                     // Collect all schemas with max score
                     let max_candidates: Vec<_> = candidates
                         .into_iter()
                         .filter(|(_, score)| (*score - max_score).abs() < f64::EPSILON)
                         .collect();
-                    
+
                     if max_candidates.len() > 1 {
-                        // Tie-breaker: prefer lexicographically closest name
-                        let pydantic_name_lower = pydantic_name.to_lowercase();
-                        if let Some((schema, _)) = max_candidates
+                        // Tie-breaker: pick lexicographically first name for determinism
+                        if let Some((schema, score)) = max_candidates
                             .iter()
-                            .min_by_key(|(schema, _)| {
-                                // Calculate "distance" as lexicographic comparison
-                                schema.name.to_lowercase().cmp(&pydantic_name_lower)
-                            })
+                            .min_by_key(|(schema, _)| schema.name.to_lowercase())
                         {
                             tracing::debug!(
                                 pydantic_name = %pydantic_name,
                                 chosen_schema = %schema.name,
-                                score = max_score,
-                                "Tie-breaker applied for schema matching"
+                                score = score,
+                                candidates_count = max_candidates.len(),
+                                "Tie-breaker: chose lexicographically first schema"
                             );
                             return Some(*schema);
                         }
-                        return None;
-                    } else {
-                        return max_candidates.first().map(|(schema, _)| *schema);
                     }
+                    return max_candidates.first().map(|(schema, _)| *schema);
                 }
             }
         }

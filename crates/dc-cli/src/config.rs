@@ -88,7 +88,7 @@ pub struct EndpointConfig {
 
 impl Config {
     /// Loads configuration from a file
-    /// 
+    ///
     /// # Arguments
     /// * `path` - Path to the config file (can be absolute or relative)
     /// * `base_path` - Optional base path for resolving relative paths in config.
@@ -99,15 +99,14 @@ impl Config {
             .with_context(|| format!("Failed to read config file: {}", path))?;
         let mut config: Config = toml::from_str(&content)
             .with_context(|| format!("Failed to parse config file: {}", path))?;
-        
+
         // Determine base path: use provided base_path or config file directory
-        let base = base_path.unwrap_or_else(|| {
-            config_path.parent().unwrap_or_else(|| Path::new("."))
-        });
-        
+        let base =
+            base_path.unwrap_or_else(|| config_path.parent().unwrap_or_else(|| Path::new(".")));
+
         // Resolve relative paths in config
         config.resolve_relative_paths(base)?;
-        
+
         config.validate()?;
         Ok(config)
     }
@@ -239,29 +238,31 @@ impl Config {
             if !Path::new(entry_point).is_absolute() {
                 let joined = base.join(entry_point);
                 let resolved = if joined.exists() {
-                    joined.canonicalize()
-                        .with_context(|| format!("Failed to resolve entry_point: {}", entry_point))?
+                    joined.canonicalize().with_context(|| {
+                        format!("Failed to resolve entry_point: {}", entry_point)
+                    })?
                 } else {
                     joined
                 };
                 self.entry_point = Some(resolved.to_string_lossy().to_string());
             }
         }
-        
+
         // Resolve global openapi_path if present
         if let Some(ref openapi_path) = self.openapi_path {
             if !Path::new(openapi_path).is_absolute() {
                 let joined = base.join(openapi_path);
                 let resolved = if joined.exists() {
-                    joined.canonicalize()
-                        .with_context(|| format!("Failed to resolve openapi_path: {}", openapi_path))?
+                    joined.canonicalize().with_context(|| {
+                        format!("Failed to resolve openapi_path: {}", openapi_path)
+                    })?
                 } else {
                     joined
                 };
                 self.openapi_path = Some(resolved.to_string_lossy().to_string());
             }
         }
-        
+
         // Resolve adapter-specific paths
         for adapter in &mut self.adapters {
             // Resolve app_path for FastAPI
@@ -269,7 +270,8 @@ impl Config {
                 if !Path::new(app_path).is_absolute() {
                     let joined = base.join(app_path);
                     let resolved = if joined.exists() {
-                        joined.canonicalize()
+                        joined
+                            .canonicalize()
                             .with_context(|| format!("Failed to resolve app_path: {}", app_path))?
                     } else {
                         joined
@@ -277,7 +279,7 @@ impl Config {
                     adapter.app_path = Some(resolved.to_string_lossy().to_string());
                 }
             }
-            
+
             // Resolve src_paths for TypeScript/NestJS
             if let Some(ref src_paths) = adapter.src_paths {
                 let mut resolved_paths = Vec::new();
@@ -287,8 +289,9 @@ impl Config {
                     } else {
                         let joined = base.join(src_path);
                         let resolved = if joined.exists() {
-                            joined.canonicalize()
-                                .with_context(|| format!("Failed to resolve src_path: {}", src_path))?
+                            joined.canonicalize().with_context(|| {
+                                format!("Failed to resolve src_path: {}", src_path)
+                            })?
                         } else {
                             joined
                         };
@@ -297,14 +300,15 @@ impl Config {
                 }
                 adapter.src_paths = Some(resolved_paths);
             }
-            
+
             // Resolve adapter-specific openapi_path
             if let Some(ref openapi_path) = adapter.openapi_path {
                 if !Path::new(openapi_path).is_absolute() {
                     let joined = base.join(openapi_path);
                     let resolved = if joined.exists() {
-                        joined.canonicalize()
-                            .with_context(|| format!("Failed to resolve adapter openapi_path: {}", openapi_path))?
+                        joined.canonicalize().with_context(|| {
+                            format!("Failed to resolve adapter openapi_path: {}", openapi_path)
+                        })?
                     } else {
                         joined
                     };
@@ -312,13 +316,13 @@ impl Config {
                 }
             }
         }
-        
+
         // Resolve output path
         if !Path::new(&self.output.path).is_absolute() {
             let resolved = base.join(&self.output.path);
             self.output.path = resolved.to_string_lossy().to_string();
         }
-        
+
         Ok(())
     }
 
@@ -398,7 +402,7 @@ impl Config {
     pub fn auto_fill_openapi(&mut self, config_file_path: &str) {
         // Call auto_find_openapi exactly once and cache the result
         let found_path = Self::auto_find_openapi(config_file_path);
-        
+
         // Only search if global openapi_path is not set
         if self.openapi_path.is_none() {
             if let Some(ref path) = found_path {

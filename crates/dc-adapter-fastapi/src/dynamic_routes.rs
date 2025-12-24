@@ -6,7 +6,7 @@ use rustpython_parser::{parse, Mode};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::utils::parse_http_method;
 
@@ -525,7 +525,18 @@ impl DynamicRoutesAnalyzer {
         let mut endpoints = Vec::new();
 
         for endpoint_config in &config.endpoints {
-            let method = parse_http_method(&endpoint_config.method);
+            let method = match parse_http_method(&endpoint_config.method) {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!(
+                        endpoint_path = %endpoint_config.path,
+                        method = %endpoint_config.method,
+                        error = %e,
+                        "Unrecognized HTTP method, using GET as fallback"
+                    );
+                    HttpMethod::Get
+                }
+            };
             endpoints.push(DynamicEndpoint {
                 path: endpoint_config.path.clone(),
                 method,

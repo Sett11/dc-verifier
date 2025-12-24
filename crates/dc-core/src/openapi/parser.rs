@@ -196,10 +196,10 @@ impl OpenAPIParser {
 
         if let Some(components) = &schema.components {
             if let Some(schema_map) = &components.schemas {
-                // Reuse a single visited HashSet for both property extraction and reference resolution
-                let mut visited = std::collections::HashSet::new();
-                
                 for (name, schema_ref) in schema_map {
+                    // Create a fresh visited HashSet for each schema to avoid cross-schema pollution
+                    let mut visited = std::collections::HashSet::new();
+
                     let properties =
                         Self::extract_schema_properties(schema_ref, schema, &mut visited);
 

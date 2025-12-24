@@ -172,7 +172,7 @@ fn generate_dot(graph: &CallGraph, graph_name: &str) -> Result<String> {
             ) {
                 let edge_label = format_edge_label(edge);
                 let escaped_label = escape_dot_string(&edge_label);
-                
+
                 // Apply style attributes for DataFlow edges
                 if matches!(edge, CallEdge::DataFlow { .. }) {
                     dot.push_str(&format!(

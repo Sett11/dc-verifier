@@ -22,14 +22,17 @@ pub struct FileWriter {
 }
 
 impl FileWriter {
+    /// Creates a new FileWriter
+    ///
+    /// Note: This constructor may be called before tracing is configured,
+    /// so it must not use tracing macros to avoid recursive logging.
     pub fn new(path: PathBuf) -> Self {
         // Create parent directories if they don't exist
         if let Some(parent) = path.parent() {
             if let Err(err) = std::fs::create_dir_all(parent) {
-                tracing::warn!(
-                    parent = ?parent,
-                    error = %err,
-                    "Failed to create log directory, file operations may fail"
+                eprintln!(
+                    "Warning: Failed to create log directory {:?}: {}",
+                    parent, err
                 );
             }
         }
@@ -45,7 +48,7 @@ impl<'a> MakeWriter<'a> for FileWriter {
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        
+
         match OpenOptions::new()
             .create(true)
             .append(true)
@@ -54,10 +57,10 @@ impl<'a> MakeWriter<'a> for FileWriter {
             Ok(file) => Box::new(std::io::BufWriter::new(file)),
             Err(err) => {
                 // Fallback to stderr writer on error
-                tracing::error!(
-                    path = ?self.path,
-                    error = %err,
-                    "Failed to open log file, falling back to stderr"
+                // Note: Cannot use tracing here as it may cause recursion
+                eprintln!(
+                    "Error: Failed to open log file {:?}: {}, falling back to stderr",
+                    self.path, err
                 );
                 Box::new(std::io::BufWriter::new(std::io::stderr()))
             }

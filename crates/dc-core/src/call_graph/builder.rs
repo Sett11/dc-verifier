@@ -981,7 +981,7 @@ impl CallGraphBuilder {
                             {
                                 return true;
                             }
-                            
+
                             // For "Model" check, require SQLAlchemy-like attributes
                             if base_str.ends_with("Model") || last_segment == "Model" {
                                 // Additional check: look for Column attributes in class body
@@ -1780,7 +1780,7 @@ impl CallGraphBuilder {
         ];
         // Check for exact match or word boundary match
         if service_types.iter().any(|&st| {
-            param.name == st 
+            param.name == st
                 || param.name.starts_with(&format!("{}_", st))
                 || param.name.ends_with(&format!("_{}", st))
                 || param.name.contains(&format!("_{}_", st))

@@ -22,7 +22,7 @@ fn is_external_dependency(module_name: &str, project_root: &Path) -> bool {
                 }
                 // Check for exact package name match with proper boundaries
                 // Match: module_name, module_name==, module_name>=, module_name[, etc.
-                if line == module_name 
+                if line == module_name
                     || line.starts_with(&format!("{}=", module_name))
                     || line.starts_with(&format!("{}>", module_name))
                     || line.starts_with(&format!("{}<", module_name))
@@ -983,11 +983,11 @@ impl PythonParser {
     #[allow(clippy::only_used_in_recursion)]
     fn extract_inner_type_recursive_impl(&self, type_str: &str, depth: usize) -> String {
         const MAX_DEPTH: usize = 20;
-        
+
         if depth > MAX_DEPTH {
             return type_str.trim().to_string();
         }
-        
+
         // Remove whitespace
         let trimmed = type_str.trim();
 
@@ -1011,7 +1011,8 @@ impl PythonParser {
                             let value_type = inner_trimmed[comma_pos + 1..].trim();
                             // Recursively extract from value type
                             if value_type.contains('[') {
-                                return self.extract_inner_type_recursive_impl(value_type, depth + 1);
+                                return self
+                                    .extract_inner_type_recursive_impl(value_type, depth + 1);
                             }
                             return value_type.to_string();
                         }
@@ -1023,7 +1024,8 @@ impl PythonParser {
                     if base_type == "list" || base_type == "List" {
                         // Recursively extract from inner type
                         if inner_trimmed.contains('[') {
-                            return self.extract_inner_type_recursive_impl(inner_trimmed, depth + 1);
+                            return self
+                                .extract_inner_type_recursive_impl(inner_trimmed, depth + 1);
                         }
                         return inner_trimmed.to_string();
                     }
@@ -1032,7 +1034,8 @@ impl PythonParser {
                     if base_type == "Optional" {
                         // Recursively extract from inner type
                         if inner_trimmed.contains('[') {
-                            return self.extract_inner_type_recursive_impl(inner_trimmed, depth + 1);
+                            return self
+                                .extract_inner_type_recursive_impl(inner_trimmed, depth + 1);
                         }
                         return inner_trimmed.to_string();
                     }
@@ -1046,7 +1049,10 @@ impl PythonParser {
                             if part_trimmed != "None" && !part_trimmed.is_empty() {
                                 // Recursively extract from this type
                                 if part_trimmed.contains('[') {
-                                    return self.extract_inner_type_recursive_impl(part_trimmed, depth + 1);
+                                    return self.extract_inner_type_recursive_impl(
+                                        part_trimmed,
+                                        depth + 1,
+                                    );
                                 }
                                 return part_trimmed.to_string();
                             }

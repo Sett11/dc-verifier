@@ -79,8 +79,8 @@ impl NestJSCallGraphBuilder {
         // 4. Process decorators for each file
         let parser = TypeScriptParser::new();
         let parameter_extractor = ParameterExtractor::new().with_dto_extractor(dto_extractor);
-        let mut decorator_processor = NestJSDecoratorProcessor::new(graph)
-            .with_parameter_extractor(parameter_extractor);
+        let mut decorator_processor =
+            NestJSDecoratorProcessor::new(graph).with_parameter_extractor(parameter_extractor);
 
         for file in files {
             if let Err(err) =
