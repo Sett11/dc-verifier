@@ -49,7 +49,7 @@ pub fn execute_visualize(config_path: &str) -> Result<()> {
                 let adapter_dynamic_routes = config
                     .dynamic_routes
                     .as_ref()
-                    .map(|dr| convert_dynamic_routes_config(dr));
+                    .map(convert_dynamic_routes_config);
                 builder = builder.with_dynamic_routes_config(adapter_dynamic_routes);
                 let graph = builder.build_graph()?;
                 let unique_id = format!("{}_{}", adapter_config.adapter_type, idx);

@@ -103,30 +103,28 @@ impl ZodExtractor {
     /// Extracts Zod type from an expression
     /// Handles: z.string(), z.number(), z.boolean(), z.array(), z.object(), etc.
     /// Also handles chained methods: z.string().email(), z.number().min(1), etc.
+    #[allow(clippy::only_used_in_recursion)]
     fn extract_zod_type(&self, expr: &Expr) -> String {
-        match expr {
-            Expr::Call(call) => {
-                if let Callee::Expr(callee) = &call.callee {
-                    if let Expr::Member(member) = callee.as_ref() {
-                        if let MemberProp::Ident(prop) = &member.prop {
-                            let method = prop.sym.as_ref();
+        if let Expr::Call(call) = expr {
+            if let Callee::Expr(callee) = &call.callee {
+                if let Expr::Member(member) = callee.as_ref() {
+                    if let MemberProp::Ident(prop) = &member.prop {
+                        let method = prop.sym.as_ref();
 
-                            // Check if this is a Zod call (z.string, z.number, etc.)
-                            if let Expr::Ident(ident) = member.obj.as_ref() {
-                                if ident.sym.as_ref() == "z" {
-                                    // Base type: string, number, boolean, array, object
-                                    return method.to_string();
-                                }
+                        // Check if this is a Zod call (z.string, z.number, etc.)
+                        if let Expr::Ident(ident) = member.obj.as_ref() {
+                            if ident.sym.as_ref() == "z" {
+                                // Base type: string, number, boolean, array, object
+                                return method.to_string();
                             }
-
-                            // If not a direct Zod call, might be a chained method
-                            // Recursively check the base expression
-                            return self.extract_zod_type(member.obj.as_ref());
                         }
+
+                        // If not a direct Zod call, might be a chained method
+                        // Recursively check the base expression
+                        return self.extract_zod_type(member.obj.as_ref());
                     }
                 }
             }
-            _ => {}
         }
 
         "unknown".to_string()
@@ -134,32 +132,30 @@ impl ZodExtractor {
 
     /// Checks if a Zod expression is optional (has .optional() or .nullable())
     /// Handles chains like: z.string().optional(), z.number().nullable(), etc.
+    #[allow(clippy::only_used_in_recursion)]
     fn is_zod_optional(&self, expr: &Expr) -> (bool, bool) {
-        match expr {
-            Expr::Call(call) => {
-                if let Callee::Expr(callee) = &call.callee {
-                    if let Expr::Member(member) = callee.as_ref() {
-                        if let MemberProp::Ident(prop) = &member.prop {
-                            let method = prop.sym.as_ref();
+        if let Expr::Call(call) = expr {
+            if let Callee::Expr(callee) = &call.callee {
+                if let Expr::Member(member) = callee.as_ref() {
+                    if let MemberProp::Ident(prop) = &member.prop {
+                        let method = prop.sym.as_ref();
 
-                            // Check for .optional() or .nullable()
-                            if method == "optional" {
-                                // Recursively check the base expression
-                                let (_, nullable) = self.is_zod_optional(member.obj.as_ref());
-                                return (true, nullable);
-                            } else if method == "nullable" {
-                                // Recursively check the base expression
-                                let (optional, _) = self.is_zod_optional(member.obj.as_ref());
-                                return (optional, true);
-                            } else {
-                                // Continue checking the chain
-                                return self.is_zod_optional(member.obj.as_ref());
-                            }
+                        // Check for .optional() or .nullable()
+                        if method == "optional" {
+                            // Recursively check the base expression
+                            let (_, nullable) = self.is_zod_optional(member.obj.as_ref());
+                            return (true, nullable);
+                        } else if method == "nullable" {
+                            // Recursively check the base expression
+                            let (optional, _) = self.is_zod_optional(member.obj.as_ref());
+                            return (optional, true);
+                        } else {
+                            // Continue checking the chain
+                            return self.is_zod_optional(member.obj.as_ref());
                         }
                     }
                 }
             }
-            _ => {}
         }
 
         (false, false)
@@ -326,18 +322,16 @@ impl ZodExtractor {
                     );
                 }
             }
-            Stmt::Decl(decl) => {
-                if let swc_ecma_ast::Decl::Var(var_decl) = decl {
-                    for decl in &var_decl.decls {
-                        if let Some(init) = &decl.init {
-                            self.walk_expr_for_zod_usage(
-                                init.as_ref(),
-                                schema_name,
-                                usages,
-                                file_path,
-                                converter,
-                            );
-                        }
+            Stmt::Decl(swc_ecma_ast::Decl::Var(var_decl)) => {
+                for decl in &var_decl.decls {
+                    if let Some(init) = &decl.init {
+                        self.walk_expr_for_zod_usage(
+                            init.as_ref(),
+                            schema_name,
+                            usages,
+                            file_path,
+                            converter,
+                        );
                     }
                 }
             }
@@ -346,6 +340,7 @@ impl ZodExtractor {
     }
 
     /// Walks Expression to find Zod schema usages
+    #[allow(clippy::only_used_in_recursion)]
     fn walk_expr_for_zod_usage(
         &self,
         expr: &Expr,

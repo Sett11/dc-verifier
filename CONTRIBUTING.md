@@ -37,44 +37,6 @@ Thank you for your interest in contributing to dc-verifier (Data Chains Verifier
   - `README.md` - add to "Features" section and examples
   - `CHANGELOG.md` - add entry in `[Unreleased]` section under appropriate category (Added/Changed/Fixed)
 
-## Local Development with Docker
-
-To ensure consistent development environment and catch formatting/linting issues before committing, use the provided Docker setup:
-
-### Prerequisites
-- Docker and Docker Compose installed
-
-### Usage
-
-1. **Enter the development container**:
-   ```bash
-   docker-compose run --rm dev bash
-   ```
-
-2. **Inside the container, run checks before committing**:
-   ```bash
-   # Check code formatting
-   cargo fmt --check
-   
-   # Auto-fix formatting issues
-   cargo fmt
-   
-   # Run linter (IMPORTANT: use -D warnings to match CI)
-   cargo clippy --all-targets --all-features -- -D warnings
-   
-   # Run all tests
-   cargo test --all
-   
-   # Build the project
-   cargo build
-   ```
-   
-   **Important**: Always use `-D warnings` with clippy to match GitHub Actions behavior. Without this flag, warnings won't be treated as errors and you might miss issues that will fail in CI.
-
-3. **Exit the container** when all checks pass and commit your changes.
-
-**Note**: The Docker container provides a consistent environment. All checks are run **manually** by the developer. GitHub Actions serves as a final safety net.
-
 ## Running Tests
 
 ```bash

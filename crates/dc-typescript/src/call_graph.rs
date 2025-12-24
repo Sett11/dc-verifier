@@ -1392,40 +1392,38 @@ impl TypeScriptCallGraphBuilder {
             if let Some(endpoint) = linker.match_route_to_endpoint(&api_call.path, api_call.method)
             {
                 // Update existing Route node in the graph with OpenAPI schema references
-                if let Some(call_node) = self.graph.node_weight_mut(route_node.0) {
-                    if let CallNode::Route {
-                        request_schema,
-                        response_schema,
-                        ..
-                    } = call_node
-                    {
-                        // Request schema from OpenAPI (if any)
-                        if let Some(ref schema_name) = endpoint.request_schema {
-                            *request_schema = Some(dc_core::models::SchemaReference {
-                                name: schema_name.clone(),
-                                schema_type: dc_core::models::SchemaType::OpenAPI,
-                                location: Location {
-                                    file: format!("openapi://{}", schema_name),
-                                    line: 0,
-                                    column: None,
-                                },
-                                metadata: std::collections::HashMap::new(),
-                            });
-                        }
+                if let Some(CallNode::Route {
+                    request_schema,
+                    response_schema,
+                    ..
+                }) = self.graph.node_weight_mut(route_node.0)
+                {
+                    // Request schema from OpenAPI (if any)
+                    if let Some(ref schema_name) = endpoint.request_schema {
+                        *request_schema = Some(dc_core::models::SchemaReference {
+                            name: schema_name.clone(),
+                            schema_type: dc_core::models::SchemaType::OpenAPI,
+                            location: Location {
+                                file: format!("openapi://{}", schema_name),
+                                line: 0,
+                                column: None,
+                            },
+                            metadata: std::collections::HashMap::new(),
+                        });
+                    }
 
-                        // Response schema from OpenAPI (if any)
-                        if let Some(ref schema_name) = endpoint.response_schema {
-                            *response_schema = Some(dc_core::models::SchemaReference {
-                                name: schema_name.clone(),
-                                schema_type: dc_core::models::SchemaType::OpenAPI,
-                                location: Location {
-                                    file: format!("openapi://{}", schema_name),
-                                    line: 0,
-                                    column: None,
-                                },
-                                metadata: std::collections::HashMap::new(),
-                            });
-                        }
+                    // Response schema from OpenAPI (if any)
+                    if let Some(ref schema_name) = endpoint.response_schema {
+                        *response_schema = Some(dc_core::models::SchemaReference {
+                            name: schema_name.clone(),
+                            schema_type: dc_core::models::SchemaType::OpenAPI,
+                            location: Location {
+                                file: format!("openapi://{}", schema_name),
+                                line: 0,
+                                column: None,
+                            },
+                            metadata: std::collections::HashMap::new(),
+                        });
                     }
                 }
             }
@@ -2193,11 +2191,10 @@ impl TypeScriptCallGraphBuilder {
         self.graph
             .node_indices()
             .find(|&node_id| {
-                if let Some(node) = self.graph.node_weight(node_id) {
-                    if let CallNode::Schema { schema: schema_ref } = node {
-                        return schema_ref.name == schema_name
-                            && schema_ref.schema_type == schema_type;
-                    }
+                if let Some(CallNode::Schema { schema: schema_ref }) =
+                    self.graph.node_weight(node_id)
+                {
+                    return schema_ref.name == schema_name && schema_ref.schema_type == schema_type;
                 }
                 false
             })

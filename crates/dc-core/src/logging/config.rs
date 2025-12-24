@@ -18,10 +18,7 @@ impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
             level: std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
-            file: std::env::var("DCV_LOG_FILE")
-                .ok()
-                .map(PathBuf::from)
-                .or_else(|| Some(PathBuf::from("dc-verifier.log"))),
+            file: std::env::var("DCV_LOG_FILE").ok().map(PathBuf::from),
             console: true,
             format: LogFormat::Text,
         }

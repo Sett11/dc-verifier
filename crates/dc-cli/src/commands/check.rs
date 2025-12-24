@@ -89,7 +89,7 @@ pub fn execute_check(config_path: &str, format: ReportFormat, verbose: bool) -> 
                 let adapter_dynamic_routes = config
                     .dynamic_routes
                     .as_ref()
-                    .map(|dr| convert_dynamic_routes_config(dr));
+                    .map(convert_dynamic_routes_config);
                 builder = builder.with_dynamic_routes_config(adapter_dynamic_routes);
                 let graph = builder.build_graph()?;
 

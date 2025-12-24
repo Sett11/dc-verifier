@@ -53,6 +53,7 @@ struct FastAPIUsersRouter {
 }
 
 /// Analyzer for dynamically generated FastAPI routes (e.g., fastapi_users)
+#[derive(Default)]
 pub struct DynamicRoutesAnalyzer {
     /// Cache of include_router calls with their prefixes (path -> prefix)
     include_router_prefixes: HashMap<PathBuf, Vec<(usize, String)>>,
@@ -66,12 +67,7 @@ pub struct DynamicRoutesAnalyzer {
 
 impl DynamicRoutesAnalyzer {
     pub fn new() -> Self {
-        let mut analyzer = Self {
-            include_router_prefixes: HashMap::new(),
-            router_generators: Vec::new(),
-            file_asts: HashMap::new(),
-            generators: Vec::new(),
-        };
+        let mut analyzer = Self::default();
 
         // Регистрировать встроенные генераторы
         analyzer.register_default_generators();
@@ -777,6 +773,7 @@ pub struct FastAPIUsersRouterGenerator;
 
 impl FastAPIUsersRouterGenerator {
     /// Helper method to convert expression to string
+    #[allow(clippy::only_used_in_recursion)]
     fn expr_to_string(&self, expr: &ast::Expr) -> String {
         match expr {
             ast::Expr::Name(name) => name.id.to_string(),

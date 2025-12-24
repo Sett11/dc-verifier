@@ -92,7 +92,7 @@ impl Config {
     /// # Arguments
     /// * `path` - Path to the config file (can be absolute or relative)
     /// * `base_path` - Optional base path for resolving relative paths in config.
-    ///                 If None, uses the directory of the config file as base.
+    ///   If None, uses the directory of the config file as base.
     pub fn load(path: &str, base_path: Option<&Path>) -> Result<Self> {
         let config_path = Path::new(path);
         let content = fs::read_to_string(config_path)
